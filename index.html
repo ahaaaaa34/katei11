@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#f6f6f4" />
+  <meta name="description" content="高校数学II 三角関数 問題演習アプリ。Sペン対応のスマートフォンで使いやすい専用UIを搭載。" />
+  <title>トリゴ・マスター | 三角関数演習</title>
+
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- KaTeX for math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+          onload="renderMathInElement(document.body, {delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="mode-solve">
+
+    <!-- ===== HOME SCREEN (problem-type picker) ===== -->
+    <div id="home-screen" class="home-screen">
+      <button id="btn-home-close" class="icon-btn home-close hidden" aria-label="戻る" title="演習に戻る">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+        </svg>
+      </button>
+      <button id="btn-settings" class="icon-btn home-settings" aria-label="設定" title="設定">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <div class="home-inner">
+        <div class="home-hero">
+          <div class="home-logo">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="#1a1a1a" stroke-width="1.5"/>
+              <line x1="12" y1="2" x2="12" y2="22" stroke="#1a1a1a" stroke-width="1"/>
+              <line x1="2" y1="12" x2="22" y2="12" stroke="#1a1a1a" stroke-width="1"/>
+              <path d="M12 2 Q 22 12 12 22" stroke="#133463" stroke-width="1.2" fill="none"/>
+            </svg>
+          </div>
+          <h1 class="home-title">トリゴ・マスター</h1>
+          <p class="home-sub">高校数学II・三角関数 演習</p>
+        </div>
+
+        <div class="home-mode-row">
+          <span class="home-mode-label">出題モード</span>
+          <div id="home-count-mode" class="home-mode-toggle">
+            <button type="button" class="home-mode-btn active" data-mode="endless">エンドレス</button>
+            <button type="button" class="home-mode-btn" data-mode="10">10問</button>
+          </div>
+        </div>
+
+        <h2 class="home-section">問題の種類を選ぶ</h2>
+        <div id="home-categories" class="home-cat-grid"><!-- populated by JS --></div>
+      </div>
+    </div>
+
+    <!-- ===== HEADER ===== -->
+    <header id="app-header">
+      <div class="header-left">
+        <div class="app-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="url(#lg1)" stroke-width="1.5"/>
+            <line x1="12" y1="2" x2="12" y2="22" stroke="url(#lg1)" stroke-width="1"/>
+            <line x1="2" y1="12" x2="22" y2="12" stroke="url(#lg1)" stroke-width="1"/>
+            <path d="M12 2 Q 22 12 12 22" stroke="#133463" stroke-width="1.2" fill="none"/>
+            <defs>
+              <linearGradient id="lg1" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#1a1a1a"/>
+                <stop offset="100%" stop-color="#133463"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <span class="app-title">トリゴ・マスター</span>
+      </div>
+      <div class="header-right">
+        <span id="problem-counter" class="problem-counter">1 / 10</span>
+        <button id="btn-home" class="icon-btn" aria-label="問題を選ぶ" title="問題を選ぶ">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ===== PROGRESS BAR ===== -->
+    <div id="progress-bar-container" class="progress-bar-container">
+      <div id="progress-bar" class="progress-bar"></div>
+    </div>
+
+    <!-- ===== CATEGORY TABS ===== -->
+    <nav id="category-tabs" class="category-tabs">
+      <!-- Populated by JS -->
+    </nav>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="main-content">
+
+      <!-- Problem Panel -->
+      <section id="problem-panel" class="panel">
+        <div class="panel-header">
+          <span class="panel-label">問題</span>
+          <div class="panel-actions">
+            <button id="btn-hint" class="pill-btn" aria-label="ヒント">ヒント</button>
+            <button id="btn-home-panel" class="icon-btn" aria-label="ホーム" title="ホーム">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 9.5 12 3l9 6.5"/><path d="M5 9v11h14V9"/><path d="M9.5 20v-6h5v6"/>
+              </svg>
+            </button>
+            <button id="btn-minimize-problem" class="icon-btn" aria-label="出題を選ぶ" title="出題を選ぶ">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="problem-text" class="problem-text">
+          <!-- Populated by JS -->
+        </div>
+        <div id="hint-box" class="hint-box hidden">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- Canvas Panel -->
+      <section id="canvas-panel" class="panel">
+        <div class="canvas-toolbar">
+          <div class="tool-group">
+            <button id="tool-pen" class="tool-btn active" data-tool="pen" title="ペン">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+              </svg>
+            </button>
+            <button id="tool-eraser-sm" class="tool-btn" data-tool="eraser-sm" title="消しゴム（小）">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 20H7L3 16l12-12 5 5-2.5 2.5"/><path d="M6.0001 17.0001 17 6"/>
+              </svg>
+            </button>
+            <button id="tool-eraser-lg" class="tool-btn" data-tool="eraser-lg" title="消しゴム（大）">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M20 20H7L3 16l12-12 5 5-2.5 2.5"/><path d="M6.0001 17.0001 17 6"/>
+              </svg>
+            </button>
+          </div>
+          <div class="tool-group stroke-colors" id="stroke-colors">
+            <button class="color-btn active" data-color="#1a1a1a" style="background:#1a1a1a" title="黒"></button>
+            <button class="color-btn" data-color="#133463" style="background:#133463" title="ネイビー"></button>
+            <button class="color-btn" data-color="#b60033" style="background:#b60033" title="赤"></button>
+          </div>
+          <div class="tool-group">
+            <button id="tool-circle" class="tool-btn" data-tool="circle" title="単位円を描画">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="2" x2="12" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
+              </svg>
+            </button>
+            <button id="tool-region" class="tool-btn" data-tool="region" title="答えを囲む">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 2.5">
+                <rect x="3" y="5" width="18" height="14" rx="2.5"/>
+              </svg>
+            </button>
+            <button id="tool-undo" class="tool-btn" title="元に戻す">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>
+              </svg>
+            </button>
+            <button id="tool-clear" class="tool-btn" title="全消去">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6 18.1 20a2 2 0 0 1-2 1.9H7.9a2 2 0 0 1-2-1.9L5 6m5 0V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/>
+              </svg>
+            </button>
+          </div>
+          <button id="btn-fullscreen-canvas" class="pill-btn fullscreen-toggle" title="全画面キャンバス">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+              <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+            </svg>
+            全画面
+          </button>
+        </div>
+        <canvas id="drawing-canvas"></canvas>
+        <!-- Fullscreen exit button (hidden by default) -->
+        <button id="btn-exit-fullscreen" class="exit-fullscreen hidden" title="全画面を終了">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/>
+            <line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/>
+          </svg>
+        </button>
+      </section>
+
+      <!-- Answer Panel -->
+      <section id="answer-panel" class="panel">
+        <div class="panel-header">
+          <button id="btn-back-to-solve" class="pill-btn" aria-label="計算に戻る">← 計算に戻る</button>
+          <div class="panel-actions">
+            <span class="panel-label">解答</span>
+            <button id="btn-self-judge" class="pill-btn self-judge-btn" aria-label="自己判定">👁 自己判定</button>
+            <button id="btn-clear-answer" class="pill-btn danger" aria-label="解答をクリア">クリア</button>
+          </div>
+        </div>
+
+        <!-- Cropped snapshot of the region circled on the whiteboard -->
+        <div id="answer-ref-card" class="answer-ref-card hidden">
+          <span class="ref-card-label">囲んだ箇所</span>
+          <img id="answer-ref-img" class="ref-card-img" alt="囲んだ答えの範囲" />
+          <button id="btn-hide-ref" class="icon-btn ref-card-close" aria-label="参照を隠す" title="隠す">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Answer Display: inline expression builder -->
+        <div id="answer-display" class="answer-display" role="region" aria-label="解答入力欄">
+          <div id="answer-tokens" class="answer-tokens">
+            <!-- Tokens added dynamically -->
+          </div>
+          <span class="cursor-caret" id="input-caret">|</span>
+        </div>
+
+        <!-- Submit Button -->
+        <button id="btn-submit" class="submit-btn">
+          <span>解答を確認</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+          </svg>
+        </button>
+      </section>
+
+    </main>
+
+    <!-- ===== SOLVE-MODE CTA: reveal answer input ===== -->
+    <button id="btn-enter-answer" class="enter-answer-btn">答えを入力</button>
+
+    <!-- ===== CUSTOM KEYBOARD ===== -->
+    <div id="custom-keyboard" class="custom-keyboard">
+      <!-- Row 0: trig functions & greek symbols -->
+      <div class="kb-row">
+        <button class="kb-key trig" data-action="insert" data-value="sin" id="kb-sin">sin</button>
+        <button class="kb-key trig" data-action="insert" data-value="cos" id="kb-cos">cos</button>
+        <button class="kb-key trig" data-action="insert" data-value="tan" id="kb-tan">tan</button>
+        <button class="kb-key trig toggle" data-action="toggle" data-values="α|β" data-kind="greek" id="kb-alphabeta">α&nbsp;β</button>
+        <button class="kb-key trig" data-action="insert" data-value="θ" id="kb-theta">θ</button>
+        <button class="kb-key trig" data-action="insert" data-value="π" id="kb-pi">π</button>
+        <button class="kb-key trig" data-action="insert" data-value="n" id="kb-n">n</button>
+      </div>
+      <!-- Row 1: operators & symbols -->
+      <div class="kb-row">
+        <button class="kb-key op toggle" data-action="toggle" data-values="(|)" data-kind="operator" id="kb-paren">（&nbsp;）</button>
+        <button class="kb-key special toggle" data-action="toggle" data-values="≦|≧" data-kind="operator" id="kb-leqgeq">≦&nbsp;≧</button>
+        <button class="kb-key op toggle" data-action="toggle" data-values="<|>" data-kind="operator" id="kb-ltgt">＜&nbsp;＞</button>
+        <button class="kb-key op" data-action="insert" data-value="=" id="kb-eq">＝</button>
+        <button class="kb-key op toggle" data-action="toggle" data-values="×|÷" data-kind="operator" id="kb-muldiv">×&nbsp;÷</button>
+        <button class="kb-key op" data-action="insert" data-value="," id="kb-comma">，</button>
+        <button class="kb-key num" data-action="insert" data-value="." id="kb-dot">.</button>
+      </div>
+      <!-- Row 2: 1 2 3 | ± | max/min -->
+      <div class="kb-row">
+        <button class="kb-key num" data-action="insert" data-value="1" id="kb-1">1</button>
+        <button class="kb-key num" data-action="insert" data-value="2" id="kb-2">2</button>
+        <button class="kb-key num" data-action="insert" data-value="3" id="kb-3">3</button>
+        <button class="kb-key op toggle" data-action="toggle" data-values="+|-" data-kind="operator" id="kb-plusminus">＋&nbsp;－</button>
+        <button class="kb-key special toggle wordtoggle" data-action="toggle" data-values="最大値|最小値" data-kind="word" id="kb-maxmin">最大<br>最小</button>
+      </div>
+      <!-- Row 3: 4 5 6 | abs | backspace -->
+      <div class="kb-row">
+        <button class="kb-key num" data-action="insert" data-value="4" id="kb-4">4</button>
+        <button class="kb-key num" data-action="insert" data-value="5" id="kb-5">5</button>
+        <button class="kb-key num" data-action="insert" data-value="6" id="kb-6">6</button>
+        <button class="kb-key special" data-action="abs" id="kb-abs">|□|</button>
+        <button class="kb-key action backspace" data-action="backspace" id="kb-backspace">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Row 4: 7 8 9 | 0 | enter -->
+      <div class="kb-row">
+        <button class="kb-key num" data-action="insert" data-value="7" id="kb-7">7</button>
+        <button class="kb-key num" data-action="insert" data-value="8" id="kb-8">8</button>
+        <button class="kb-key num" data-action="insert" data-value="9" id="kb-9">9</button>
+        <button class="kb-key num" data-action="insert" data-value="0" id="kb-0">0</button>
+        <button class="kb-key action enter" data-action="enter" id="kb-enter">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Row 5: structure tools (fraction, sqrt, exponent) -->
+      <div class="kb-row kb-structure-row">
+        <button class="kb-key action struct frac" data-action="fraction" id="kb-frac">
+          <span class="frac-preview"><span class="frac-num">□</span><span class="frac-bar"></span><span class="frac-den">□</span></span>
+        </button>
+        <button class="kb-key action struct sqrt-key" data-action="sqrt" id="kb-sqrt">√□</button>
+        <button class="kb-key action struct exp-key" data-action="exponent" id="kb-exp">x<sup>n</sup></button>
+      </div>
+    </div>
+
+  </div><!-- /#app -->
+
+  <!-- ===== ANSWER-ONLY OVERLAY ===== -->
+  <div id="answer-overlay" class="answer-overlay hidden">
+    <!-- Header -->
+    <div class="answer-overlay-header">
+      <button id="btn-overlay-back" class="answer-overlay-back" aria-label="計算に戻る">
+        ← 計算に戻る
+      </button>
+      <button id="btn-overlay-submit" class="submit-btn" style="padding:7px 20px;font-size:13px">
+        確認
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Problem recap -->
+    <div class="answer-overlay-problem">
+      <div id="overlay-category" class="answer-overlay-cat"></div>
+      <div id="overlay-problem-text"></div>
+    </div>
+
+    <!-- Circled region: shown LARGE as main content -->
+    <div id="overlay-region-display" class="overlay-region-display hidden">
+      <img id="overlay-ref-img" class="overlay-region-img" alt="囲んだ答えの範囲" />
+    </div>
+    <!-- No region placeholder -->
+    <div id="overlay-no-region" class="overlay-no-region hidden">
+      <span>キャンバスで答えを囲むと<br>ここに表示されます</span>
+    </div>
+
+    <!-- Answer input bar (compact, above keyboard) -->
+    <div class="answer-overlay-input-bar">
+      <div id="overlay-answer-display" class="answer-display overlay-answer-display-compact" role="region" aria-label="解答入力欄">
+        <div id="overlay-answer-tokens" class="answer-tokens"></div>
+        <span class="cursor-caret" id="overlay-input-caret">|</span>
+      </div>
+      <button id="btn-overlay-self-judge" class="pill-btn self-judge-btn" aria-label="自己判定">👁 自己判定</button>
+      <button id="btn-overlay-clear" class="pill-btn danger" aria-label="クリア">クリア</button>
+    </div>
+
+    <!-- Keyboard -->
+    <div id="overlay-keyboard" class="custom-keyboard"></div>
+
+    <!-- Hidden elements for JS compatibility -->
+    <div id="overlay-ref-card" style="display:none"></div>
+    <button id="btn-overlay-hide-ref" style="display:none" aria-hidden="true"></button>
+  </div><!-- /#answer-overlay -->
+
+  <!-- ===== RESULT SCREEN (full-page) ===== -->
+  <div id="result-screen" class="result-screen hidden" role="region" aria-label="結果">
+
+    <!-- 判定バナー -->
+    <div id="rs-banner" class="rs-banner">
+      <button id="btn-result-back" class="icon-btn rs-back" aria-label="戻る" title="問題に戻る">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+        </svg>
+      </button>
+      <span id="rs-icon" class="rs-icon"></span>
+      <span id="rs-title" class="rs-title"></span>
+    </div>
+
+    <!-- スクロールコンテンツ -->
+    <div class="rs-body">
+
+      <!-- [自己判定モード] 囲み画像 -->
+      <div id="rs-region-section" class="rs-section hidden">
+        <div class="rs-section-label">自分の答え（囲んだ箇所）</div>
+        <div class="rs-region-wrap">
+          <img id="rs-region-img" class="rs-region-img" alt="囲んだ答え" />
+          <p id="rs-no-region" class="rs-no-region hidden"></p>
+        </div>
+      </div>
+
+      <!-- 問題文リキャップ -->
+      <div class="rs-section">
+        <div class="rs-section-label">問題</div>
+        <div id="rs-problem" class="rs-problem-text"></div>
+      </div>
+
+      <!-- 正解 (常に表示) -->
+      <div class="rs-section">
+        <div class="rs-section-label">正解</div>
+        <div id="rs-answer" class="rs-answer-box"></div>
+      </div>
+
+      <!-- 途中式 -->
+      <div class="rs-section" id="rs-steps-section">
+        <div class="rs-section-label">途中式</div>
+        <div id="rs-steps" class="rs-steps"></div>
+      </div>
+
+    </div><!-- /.rs-body -->
+
+    <!-- 自己判定フッター (自己判定モード時) -->
+    <div id="rs-footer-judge" class="rs-footer rs-footer-judge hidden">
+      <button id="btn-judge-wrong" class="rs-btn-judge wrong">×&ensp;不正解</button>
+      <button id="btn-judge-correct" class="rs-btn-judge correct">○&ensp;正解</button>
+    </div>
+
+    <!-- 通常フッター -->
+    <div id="rs-footer-normal" class="rs-footer">
+      <button id="btn-retry" class="rs-btn-retry">もう一度</button>
+      <button id="btn-next-problem" class="rs-btn-next">次の問題へ <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
+    </div>
+
+  </div><!-- /#result-screen -->
+
+  <!-- ===== HINT MODAL ===== -->
+  <div id="hint-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <h3 class="hint-modal-title">ヒント</h3>
+      <div id="hint-content" class="hint-content"></div>
+      <button id="btn-close-hint" class="submit-btn" style="margin-top:1rem">閉じる</button>
+    </div>
+  </div>
+
+  <!-- ===== SETTINGS MODAL ===== -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card settings-card">
+      <div class="settings-header">
+        <h3 id="settings-title" class="settings-title">設定</h3>
+        <button id="btn-close-settings" class="icon-btn" aria-label="閉じる">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Category selection -->
+      <div class="settings-section">
+        <h4 class="settings-section-title">出題カテゴリ</h4>
+        <p class="settings-section-desc">出題する問題の種類を選択してください</p>
+        <div id="settings-categories" class="settings-checkbox-group">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Problem count mode -->
+      <div class="settings-section">
+        <h4 class="settings-section-title">出題モード</h4>
+        <div id="settings-count-mode" class="settings-radio-group">
+          <label class="settings-radio"><input type="radio" name="countMode" value="endless" checked /><span>エンドレス</span></label>
+          <label class="settings-radio"><input type="radio" name="countMode" value="10" /><span>10 問</span></label>
+          <label class="settings-radio"><input type="radio" name="countMode" value="20" /><span>20 問</span></label>
+          <label class="settings-radio"><input type="radio" name="countMode" value="30" /><span>30 問</span></label>
+        </div>
+      </div>
+
+      <!-- Angle notation -->
+      <div class="settings-section">
+        <h4 class="settings-section-title">角度表記</h4>
+        <div id="settings-angle" class="settings-radio-group">
+          <label class="settings-radio"><input type="radio" name="angleNotation" value="random" checked /><span>ランダム</span></label>
+          <label class="settings-radio"><input type="radio" name="angleNotation" value="degree" /><span>度数法 (°)</span></label>
+          <label class="settings-radio"><input type="radio" name="angleNotation" value="radian" /><span>弧度法 (π)</span></label>
+        </div>
+      </div>
+
+      <button id="btn-save-settings" class="submit-btn" style="margin-top:12px">保存して閉じる</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

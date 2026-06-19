@@ -1,0 +1,17 @@
+{
+  "name": "トリゴ・マスター",
+  "short_name": "トリゴ",
+  "description": "高校数学II 三角関数 問題演習アプリ。Sペン対応、専用カスタムキーボード搭載。",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d0d1a",
+  "theme_color": "#7c3aed",
+  "lang": "ja",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "categories": ["education"],
+  "prefer_related_applications": false
+}
