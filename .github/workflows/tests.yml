@@ -22,3 +22,16 @@ jobs:
         run: npm run bundle
       - name: 生成物が最新であること
         run: git diff --exit-code dist/Code.gs
+
+  # テストが本当にバグを捕まえるかを検査する。修正を1つずつ巻き戻して、
+  # 対応するテストが落ちなければ失敗させる。
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 変異テスト
+        run: python3 tools/mutate.py

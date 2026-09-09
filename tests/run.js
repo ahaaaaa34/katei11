@@ -955,6 +955,7 @@ suite('FOMC 日程の自動取得', () => {
     const years = G.parseFomcCalendar_(PAGE_HTML);
     eq(Object.keys(years).sort(), ['2026', '2027']);
     eq(years[2027].length, 8);
+    eq(years[2026].length, 8);
   });
 
   test('政策金利が出るのは会合の最終日', () => {
@@ -1031,11 +1032,25 @@ suite('FOMC 日程の自動取得', () => {
   });
 
   test('手入力がある年は絶対に上書きしない', () => {
+    // 公式ページ側にも 2026 年の（検証を通る）日程が載っている状況を作る。
+    // ガードが無ければ、手入力と違う日付が紛れ込む。
     const api = serving(PAGE_HTML);
+    const fetched = api.parseFomcCalendar_(PAGE_HTML)[2026];
+    eq(api.validateFomcYear_(fetched, 2026), null, '取得側の 2026 年も検査を通ること');
     const curated = api.MEETINGS.fomc.meetings.map((m) => m.date);
+    ok(fetched.some((m) => curated.indexOf(m.date) === -1),
+       '取得側と手入力で日付が違うこと（違わないと試験にならない）');
+
     const merged = api.allMeetings_('fomc').filter((m) => m.date.indexOf('2026') === 0);
-    eq(merged.map((m) => m.date), curated);
-    ok(merged.every((m) => !m.auto));
+    eq(merged.map((m) => m.date), curated, '手入力の日付がそのまま残ること');
+    ok(merged.every((m) => !m.auto), '2026 年に自動取得ぶんが混ざらないこと');
+  });
+
+  test('手入力より先の年だけが自動取得ぶんとして入る', () => {
+    const api = serving(PAGE_HTML);
+    const auto = api.allMeetings_('fomc').filter((m) => m.auto);
+    ok(auto.length > 0);
+    ok(auto.every((m) => m.date > '2026-12-31'), '手入力の年をまたがないこと');
   });
 
   test('検査に落ちた年は取り込まない', () => {
@@ -1163,6 +1178,368 @@ suite('診断コマンド', () => {
     const text = api.showStatus();
     ok(/手入力 2026-12-09 まで \/ 自動取得 2027-/.test(text), text);
     ok(text.indexOf('fomcAutoFetch') === -1, '挙動スイッチを情報源として並べない');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 実際に見つかったバグの回帰テスト。
+// どれも「テストは通るのに実運用で壊れる」たちのものだった。
+// ---------------------------------------------------------------------------
+suite('回帰: 窓の端で予定が作り直される', () => {
+  function offline(api) {
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    return api;
+  }
+
+  test('生成した予定は必ず一覧取得の範囲に入る（1年ぶんの窓を1日ずつ動かす）', () => {
+    const api = offline(loadGas());
+    const outside = [];
+    // 窓は短くしてよい。ここで見たいのは端の扱いで、端の日付は1日ずつ動かす。
+    for (let offset = 0; offset < 365; offset += 1) {
+      const start = G.addDays_(Y(2026, 1, 1), offset);
+      const end = G.addDays_(start, 6);
+      const ctx = { start, end, timezone: 'Asia/Tokyo' };
+      api.collectEvents_(ctx).forEach((e) => {
+        const day = api.localDate_(e.start, 'Asia/Tokyo');
+        if (day < start || day > end) outside.push(e.indicatorId + '@' + K(day));
+      });
+    }
+    eq(outside.slice(0, 5), [], '窓の外に出た予定があってはならない');
+  });
+
+  test('2回目の同期で書き込み API を一度も呼ばない（窓を動かしても）', () => {
+    [0, 7, 30, 45, 61, 90].forEach((offset) => {
+      const calendar = fakeCalendar();
+      const api = offline(loadGas({
+        Calendar: calendar,
+        properties: { _calendarId: 'cal-1', _calendarName: '経済指標 (Nasdaq)' },
+      }));
+      const base = G.addDays_(Y(2026, 3, 1), offset);
+      const ctx = { start: base, end: G.addDays_(base, 60), timezone: 'Asia/Tokyo' };
+
+      const run = () => {
+        let events = api.collectEvents_(ctx);
+        events = events.concat(api.weeklyDigestEvents_(events, ctx));
+        const existing = api.listManagedEvents_('cal-1', ctx.start, ctx.end);
+        return api.applyPlan_(api.buildPlan_('cal-1', events, existing));
+      };
+      run();
+      calendar.calls.length = 0;
+      const plan = run();
+      eq(api.planChanges_(plan), 0,
+         '窓 +' + offset + ' 日: ' + api.planSummary_(plan));
+      eq(calendar.calls.filter((c) => c[0] !== 'events.list').length, 0,
+         '窓 +' + offset + ' 日で書き込みが発生した');
+    });
+  });
+
+  test('10時 ET 以降の予定は日本時間だと翌日になる（前提の確認）', () => {
+    const ism = G.zonedTime_(Y(2026, 3, 2), '10:00', 'America/New_York');
+    eq(K(G.localDate_(ism, 'America/New_York')), '2026-03-02');
+    eq(K(G.localDate_(ism, 'Asia/Tokyo')), '2026-03-03');
+  });
+});
+
+suite('回帰: 書き込みの一時失敗で同期全体が落ちる', () => {
+  function planFor(api, calendar) {
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 3), timezone: 'Asia/Tokyo' };
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    return api.buildPlan_('c', api.collectEvents_(ctx), []);
+  }
+
+  test('レート制限は待って試し直す', () => {
+    const calendar = fakeCalendar();
+    const original = calendar.Events.insert;
+    let attempts = 0;
+    calendar.Events.insert = (resource, calendarId) => {
+      attempts++;
+      if (attempts <= 2) throw new Error('failed with error: Rate Limit Exceeded');
+      return original(resource, calendarId);
+    };
+    const api = loadGas({ Calendar: calendar, properties: { _calendarId: 'c' } });
+    api.applyPlan_(planFor(api, calendar));
+    eq(api._slept, [1000, 2000], '指数的に待つこと');
+  });
+
+  test('一時的なバックエンドエラーも試し直す', () => {
+    ['Backend Error', 'Internal error encountered', 'try again later', 'timed out']
+      .forEach((message) => {
+        ok(G.isRetriableError_(new Error(message)), message);
+      });
+  });
+
+  test('恒久的な失敗は試し直さずに投げる', () => {
+    ok(!G.isRetriableError_(new Error('Invalid value for field summary')));
+    ok(!G.isRetriableError_(new Error('Forbidden: insufficient permissions')));
+
+    const calendar = fakeCalendar();
+    calendar.Events.insert = () => { throw new Error('Invalid value for field summary'); };
+    const api = loadGas({ Calendar: calendar, properties: { _calendarId: 'c' } });
+    throws(() => api.applyPlan_(planFor(api, calendar)), 'Invalid value');
+    eq(api._slept, [], '無駄に待たないこと');
+  });
+
+  test('ID 重複はレート制限とは別物として扱う', () => {
+    ok(G.isDuplicateIdError_(new Error('failed with error: duplicate')));
+    ok(!G.isRetriableError_(new Error('failed with error: duplicate')));
+  });
+});
+
+suite('回帰: カレンダー ID のキャッシュが腐る', () => {
+  test('カレンダーを消されたら探し直して同期を続ける', () => {
+    const calendar = fakeCalendar({
+      calendarList: [{ id: 'alive@g', summary: '経済指標 (Nasdaq)' }] });
+    const listAll = calendar.Events.list;
+    calendar.Events.list = (calendarId, opts) => {
+      if (calendarId === 'gone@g') throw new Error('failed with error: Not Found');
+      return listAll(calendarId, opts);
+    };
+    const api = loadGas({
+      Calendar: calendar,
+      properties: { _calendarId: 'gone@g', _calendarName: '経済指標 (Nasdaq)' },
+    });
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+
+    const plan = api.syncCalendar();
+    eq(plan.calendarId, 'alive@g');
+    ok(plan.created.length > 0);
+  });
+
+  test('カレンダー名を変えたら新しい方を探す', () => {
+    const calendar = fakeCalendar({ calendarList: [
+      { id: 'old@g', summary: '経済指標 (Nasdaq)' },
+      { id: 'new@g', summary: 'マイ指標' },
+    ] });
+    const api = loadGas({ Calendar: calendar });
+    eq(api.resolveCalendarId_(true), 'old@g');
+    api.CONFIG.calendar.name = 'マイ指標';
+    eq(api.resolveCalendarId_(true), 'new@g', '古い ID を使い続けてはいけない');
+  });
+
+  test('名前が同じならキャッシュを使って探し直さない', () => {
+    const calendar = fakeCalendar({
+      calendarList: [{ id: 'x@g', summary: '経済指標 (Nasdaq)' }] });
+    const api = loadGas({ Calendar: calendar });
+    api.resolveCalendarId_(true);
+    calendar.calls.length = 0;
+    eq(api.resolveCalendarId_(true), 'x@g');
+    eq(calendar.calls.length, 0, '2回目は API を叩かない');
+  });
+});
+
+suite('回帰: 取りこぼしと無駄な通信', () => {
+  test('引け後の決算が窓の初日から拾える', () => {
+    const rows = {
+      '2026-11-17': [{ symbol: 'NVDA', name: 'NVIDIA', time: 'time-after-hours' }],
+      '2026-11-18': [{ symbol: 'AAPL', name: 'Apple', time: 'time-after-hours' }],
+      '2026-11-20': [{ symbol: 'MSFT', name: 'MS', time: 'time-after-hours' }],
+    };
+    const api = loadGas({
+      UrlFetchApp: {
+        fetchAll: (requests) => requests.map((request) => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            data: { rows: rows[request.url.split('date=')[1]] || [] } }),
+        })),
+      },
+    });
+    const ctx = { start: Y(2026, 11, 18), end: Y(2026, 11, 20), timezone: 'Asia/Tokyo' };
+    const got = api.providerEarnings_(ctx).map(
+      (e) => e.extra.symbol + '@' + K(api.localDate_(e.start, 'Asia/Tokyo')));
+    eq(got, ['NVDA@2026-11-18', 'AAPL@2026-11-19'],
+       '前日 ET の引け後は拾い、窓外に出るものは捨てる');
+  });
+
+  test('公式ページの取得に失敗しても、1回の同期で1回しか叩かない', () => {
+    let calls = 0;
+    const api = loadGas({
+      Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => { calls++; throw new Error('down'); } },
+    });
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.syncCalendar();
+    eq(calls, 1);
+  });
+
+  test('何も採用できなかった結果は短い期間しか使い回さない', () => {
+    const api = loadGas();
+    api._store._fomcAuto = JSON.stringify({
+      fetchedAt: Date.now() - 2 * 86400000, years: {} });
+    let calls = 0;
+    api._stubs.UrlFetchApp.fetch = () => { calls++; throw new Error('down'); };
+    api.allMeetings_('fomc');
+    eq(calls, 1, '空のキャッシュは1日で捨てて取り直す');
+  });
+});
+
+suite('回帰: 設定と時刻の取り違え', () => {
+  test('しきい値の設定が欠けても全部消えない', () => {
+    const api = loadGas();
+    delete api.CONFIG.filter.minImpact;
+    eq(api.applyFilter_([event(api, { impact: 98 })]).length, 1);
+    eq(api.applyFilter_([event(api, { impact: 10 })]).length, 0, '既定値 55 で判定する');
+  });
+
+  test('真夜中を 24 時と返す環境でも 0 として扱う', () => {
+    // Node の ICU は 0 を返すので、この分岐は普通のテストでは踏めない。
+    // Apps Script 側の ICU が h24 だった場合に備えた保険なので、
+    // その環境を作って確かめる。
+    const h24 = {
+      DateTimeFormat: function (locale, options) {
+        const inner = new Intl.DateTimeFormat(locale, options);
+        return {
+          formatToParts: (date) => inner.formatToParts(date).map(
+            (part) => (part.type === 'hour' && part.value === '00'
+              ? { type: 'hour', value: '24' } : part)),
+        };
+      },
+    };
+    const api = loadGas({ Intl: h24 });
+    const midnight = new Date(Date.UTC(2026, 8, 16, 15, 0));   // 9/17 00:00 JST
+    eq(api.tzParts_(midnight, 'Asia/Tokyo').hour, 0, '24 時は 0 に寄せる');
+    eq(api.formatClock_(midnight, 'Asia/Tokyo').time, '00:00');
+    eq(K(api.localDate_(midnight, 'Asia/Tokyo')), '2026-09-17', '日付がずれないこと');
+    // ずれの計算も 24 時を跨いで壊れないこと
+    eq(api.zonedTime_(Y(2026, 9, 17), '00:00', 'Asia/Tokyo').toISOString(),
+       midnight.toISOString());
+  });
+
+  test('日銀の発表は昼、深夜ではない', () => {
+    const boj = G.indicator_('jp_boj_decision');
+    eq(boj.tz, 'Asia/Tokyo');
+    const instant = G.zonedTime_(Y(2026, 9, 17), boj.time, G.indicatorTimezone_(boj));
+    eq(G.formatClock_(instant, 'Asia/Tokyo').time, '12:00');
+  });
+
+  test('ECB と中国は現地のタイムゾーンで持つ（米国の夏時間に引きずられない）', () => {
+    const ecb = G.indicator_('eu_ecb_decision');
+    const cn = G.indicator_('cn_pmi');
+    // 3/12 は米国が夏時間・欧州がまだ冬時間という、ずれる時期
+    [[2026, 3, 12], [2026, 9, 17]].forEach((ymd) => {
+      const day = Y(ymd[0], ymd[1], ymd[2]);
+      eq(G.formatClock_(G.zonedTime_(day, ecb.time, G.indicatorTimezone_(ecb)),
+                        'Europe/Berlin').time, '14:15', 'ECB は常に現地 14:15');
+      eq(G.formatClock_(G.zonedTime_(day, cn.time, G.indicatorTimezone_(cn)),
+                        'Asia/Shanghai').time, '09:30', '中国は常に現地 09:30');
+    });
+  });
+
+  test('海外指標のタイムゾーン指定が実在する', () => {
+    G.INDICATORS.forEach((indicator) => {
+      const tz = G.indicatorTimezone_(indicator);
+      const parts = G.tzParts_(new Date(), tz);
+      ok(parts.year > 2000, indicator.id + ': ' + tz);
+    });
+  });
+});
+
+suite('回帰: 設定ミスと多重実行', () => {
+  function runnable(overrides) {
+    const api = loadGas(Object.assign(
+      { Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() }, overrides));
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    return api;
+  }
+
+  const breakages = [
+    ['window を消す', (c) => { delete c.window; }, 'window の設定がありません'],
+    ['triggers を消す', (c) => { delete c.triggers; }, 'triggers の設定がありません'],
+    ['calendar を消す', (c) => { delete c.calendar; }, 'calendar の設定がありません'],
+    ['timezone を壊す', (c) => { c.timezone = 'Mars/Olympus'; }, 'timezone が不正'],
+    ['daysAhead を負に', (c) => { c.window.daysAhead = -1; }, 'daysAhead'],
+    ['daysAhead を巨大に', (c) => { c.window.daysAhead = 9999; }, '400 日以内'],
+    ['minImpact を範囲外に', (c) => { c.filter.minImpact = 500; }, 'minImpact'],
+    ['reminders を配列でなくする', (c) => { c.reminders.S = '30'; }, 'reminders.S'],
+    ['reminders に巨大な値', (c) => { c.reminders.S = [99999]; }, 'reminders.S'],
+    ['triggers の時刻を範囲外に', (c) => { c.triggers.morningHour = 99; }, 'morningHour'],
+  ];
+
+  breakages.forEach((row) => {
+    test(row[0] + ' と、原因の分かるエラーで止まる', () => {
+      const api = runnable();
+      row[1](api.CONFIG);
+      throws(() => api.syncCalendar(), row[2]);
+      throws(() => api.syncCalendar(), '00_config.js', 'どこを直せばよいか書いてあること');
+    });
+  });
+
+  test('まともな設定なら素通りする', () => {
+    runnable().syncCalendar();   // 例外が出なければ合格
+  });
+
+  test('Calendar 拡張サービスが無効なら、有効化の手順を出して止まる', () => {
+    const api = runnable({ Calendar: undefined });
+    throws(() => api.syncCalendar(), 'Calendar API が有効になっていません');
+    throws(() => api.syncCalendar(), 'サービス', 'どこを押せばよいか書いてあること');
+  });
+
+  test('別の同期が走っていたらこの回は何もしない', () => {
+    const calendar = fakeCalendar();
+    const api = runnable({
+      Calendar: calendar,
+      LockService: { getScriptLock: () => ({ tryLock: () => false, releaseLock: () => {} }) },
+    });
+    eq(api.syncCalendar(), null);
+    eq(calendar.calls.length, 0, 'API を一切叩かないこと');
+  });
+
+  test('失敗してもロックは必ず離す', () => {
+    let released = 0;
+    const api = runnable({
+      LockService: {
+        getScriptLock: () => ({ tryLock: () => true, releaseLock: () => { released++; } }),
+      },
+    });
+    api.CONFIG.providers.rules = false;
+    api.CONFIG.providers.fomc = false;
+    api.CONFIG.providers.market = false;
+    throws(() => api.syncCalendar(), '0 件');
+    eq(released, 1);
+  });
+
+  test('ロックが使えない環境でも同期は続く', () => {
+    const api = runnable({
+      LockService: { getScriptLock: () => { throw new Error('lock unavailable'); } },
+    });
+    ok(api.syncCalendar().created.length > 0);
+  });
+});
+
+suite('回帰: 設定ミスで実行が終わらなくなる', () => {
+  test('同期範囲は上限で頭打ちにする', () => {
+    const api = loadGas();
+    api.CONFIG.window = { daysBack: 5, daysAhead: 9999 };
+    const w = api.syncWindow_(Y(2026, 9, 9));
+    eq(G.daysBetween_(w.end, Y(2026, 9, 9)), api.MAX_WINDOW_DAYS,
+       '検証をすり抜けても何十年ぶんも展開しない');
+  });
+
+  test('壊れた値は既定値に落ちる', () => {
+    const api = loadGas();
+    api.CONFIG.window = { daysBack: -3, daysAhead: 'たくさん' };
+    const w = api.syncWindow_(Y(2026, 9, 9));
+    eq([K(w.start), K(w.end)], ['2026-09-04', '2026-11-08']);
+  });
+
+  test('window ごと消えても落ちずに既定値で動く', () => {
+    const api = loadGas();
+    delete api.CONFIG.window;
+    const w = api.syncWindow_(Y(2026, 9, 9));
+    eq([K(w.start), K(w.end)], ['2026-09-04', '2026-11-08']);
   });
 });
 

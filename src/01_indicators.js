@@ -596,8 +596,9 @@ const INDICATORS = [
     country: "JP",
     category: "fed",
     impact: 58,
-    time: "23:00",
-    duration: 60,
+    // 発表は 11:30〜12:30 JST のあいだで揺れる。中央値として 12:00 を置く。
+    time: "12:00",
+    duration: 90,
     schedule: {
       type: "none"
     },
@@ -611,7 +612,10 @@ const INDICATORS = [
     country: "EU",
     category: "fed",
     impact: 50,
-    time: "08:15",
+    // 現地 14:15。米東部時間で持つと、米欧の夏時間切替がずれる春先に
+    // 1時間ずれるので、必ず欧州のタイムゾーンで持つ。
+    time: "14:15",
+    tz: "Europe/Berlin",
     duration: 60,
     schedule: {
       type: "none"
@@ -625,7 +629,8 @@ const INDICATORS = [
     country: "CN",
     category: "sentiment",
     impact: 42,
-    time: "21:00",
+    time: "09:30",
+    tz: "Asia/Shanghai",
     duration: 30,
     schedule: {
       type: "none"

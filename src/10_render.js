@@ -35,7 +35,7 @@ function formatClock_(instant, timezone) {
   const date = ymd_(parts.year, parts.month, parts.day);
   return {
     date: parts.year + '/' + pad2_(parts.month) + '/' + pad2_(parts.day),
-    time: pad2_(parts.hour % 24) + ':' + pad2_(parts.minute),
+    time: pad2_(parts.hour) + ':' + pad2_(parts.minute),
     weekday: WEEKDAY_JA[weekdayOf_(date)],
     short: pad2_(parts.month) + '/' + pad2_(parts.day),
   };

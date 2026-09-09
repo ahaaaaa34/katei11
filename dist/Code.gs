@@ -108,6 +108,7 @@ const PROP_FRED_KEY = 'FRED_API_KEY';
 const PROP_WEBHOOK_URL = 'WEBHOOK_URL';
 const PROP_LAST_MAINTENANCE_MAIL = '_lastMaintenanceMail';
 const PROP_CALENDAR_ID = '_calendarId';
+const PROP_CALENDAR_NAME = '_calendarName';
 
 /** カレンダーに書き込んだ予定の目印（これが付いた予定だけを管理する）。 */
 const MANAGED_KEY = 'ecal';
@@ -715,8 +716,9 @@ const INDICATORS = [
     country: "JP",
     category: "fed",
     impact: 58,
-    time: "23:00",
-    duration: 60,
+    // 発表は 11:30〜12:30 JST のあいだで揺れる。中央値として 12:00 を置く。
+    time: "12:00",
+    duration: 90,
     schedule: {
       type: "none"
     },
@@ -730,7 +732,10 @@ const INDICATORS = [
     country: "EU",
     category: "fed",
     impact: 50,
-    time: "08:15",
+    // 現地 14:15。米東部時間で持つと、米欧の夏時間切替がずれる春先に
+    // 1時間ずれるので、必ず欧州のタイムゾーンで持つ。
+    time: "14:15",
+    tz: "Europe/Berlin",
     duration: 60,
     schedule: {
       type: "none"
@@ -744,7 +749,8 @@ const INDICATORS = [
     country: "CN",
     category: "sentiment",
     impact: 42,
-    time: "21:00",
+    time: "09:30",
+    tz: "Asia/Shanghai",
     duration: 30,
     schedule: {
       type: "none"
@@ -1087,7 +1093,7 @@ function tzOffsetMinutes_(instant, timezone) {
   try {
     const parts = tzParts_(instant, timezone);
     const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day,
-                           parts.hour % 24, parts.minute, parts.second);
+                           parts.hour, parts.minute, parts.second);
     return Math.round((asUTC - instant.getTime()) / 60000);
   } catch (err) {
     // Intl が使えない環境向けの保険（GAS 標準 API）。
@@ -1107,6 +1113,9 @@ function tzParts_(instant, timezone) {
   formatter.formatToParts(instant).forEach(function (part) {
     if (part.type !== 'literal') out[part.type] = parseInt(part.value, 10);
   });
+  // ICU の版によっては真夜中を 24 時と返す。ここで 0 に寄せておかないと
+  // 呼び出し側それぞれで % 24 を書く羽目になり、書き忘れが必ず起きる。
+  out.hour = out.hour % 24;
   return out;
 }
 
@@ -1477,6 +1486,18 @@ function eventTier_(event) {
   return tierFor_(event.impact);
 }
 
+/**
+ * そのイベントが同期範囲に入るか。
+ *
+ * 判定は必ず「表示タイムゾーンでの日付」で行う。予定 ID も一覧取得の範囲も
+ * 表示タイムゾーン基準なので、生成側だけ米東部の日付で判定すると、窓の端の
+ * イベントが一覧に出てこず、毎回作り直しになる。
+ */
+function inDisplayWindow_(instant, ctx) {
+  const day = localDate_(instant, ctx.timezone);
+  return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
+}
+
 /** 表示日基準の同一性。1指標・1日でひとつ。 */
 function eventUid_(event, timezone) {
   return event.indicatorId + '@' + dateKey_(localDate_(event.start, timezone));
@@ -1538,14 +1559,15 @@ function mergeEvent_(a, b) {
 
 function providerRules_(ctx) {
   const events = [];
-  // ルールが範囲の端に落ちても取りこぼさないよう、前後1か月ぶん広げて展開する。
-  const from = addDays_(ctx.start, -31);
-  const to = addDays_(ctx.end, 31);
+  // 米東部の日付と表示タイムゾーンの日付は最大1日ずれる。取りこぼさない
+  // よう数日ぶん広げて展開し、最後に表示日で絞る。
+  const from = addDays_(ctx.start, -3);
+  const to = addDays_(ctx.end, 3);
 
   indicatorsWithRules_().forEach(function (indicator) {
     ruleDates_(indicator.schedule, from, to).forEach(function (date) {
-      if (date.getTime() < ctx.start.getTime() || date.getTime() > ctx.end.getTime()) return;
       const start = zonedTime_(date, indicator.time, indicatorTimezone_(indicator));
+      if (!inDisplayWindow_(start, ctx)) return;
       events.push(makeEvent_({
         indicatorId: indicator.id,
         title: indicator.name,
@@ -1624,10 +1646,7 @@ function providerFomc_(ctx) {
     });
   });
 
-  return events.filter(function (event) {
-    const day = localDate_(event.start, indicatorTimezone_(indicator_(event.indicatorId)));
-    return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
-  });
+  return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
 function fomcEvent_(indicator, day, impact, note, period, extra) {
@@ -1662,10 +1681,7 @@ function providerMarket_(ctx) {
     pushExpiries_(events, year);
     pushRebalance_(events, year);
   }
-  return events.filter(function (event) {
-    const day = localDate_(event.start, ctx.timezone);
-    return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
-  });
+  return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
 function pushClosures_(events, year, ctx) {
@@ -1781,7 +1797,9 @@ function providerFred_(ctx) {
     return [];
   }
 
-  const rows = fredReleaseDates_(apiKey, ctx.start, ctx.end);
+  // 米東部の発表日と表示タイムゾーンの日付は1日ずれることがあるので、
+  // 前後1日ぶん広く取ってから表示日で絞る。
+  const rows = fredReleaseDates_(apiKey, addDays_(ctx.start, -1), addDays_(ctx.end, 1));
   if (rows === null) return [];
 
   const events = [];
@@ -1791,9 +1809,8 @@ function providerFred_(ctx) {
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
-    if (day.getTime() < ctx.start.getTime() || day.getTime() > ctx.end.getTime()) return;
-
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
+    if (!inDisplayWindow_(start, ctx)) return;
     events.push(makeEvent_({
       indicatorId: indicator.id,
       title: indicator.name,
@@ -1857,8 +1874,12 @@ function providerEarnings_(ctx) {
   const tickers = CONFIG.earningsTickers || {};
   if (!Object.keys(tickers).length) return [];
 
+  // 16:15 ET の引け後決算は日本時間だと翌朝になる。窓の初日ぶんを取りこぼさない
+  // よう、米東部の日付では前後1日ぶん多めに見て、最後に表示日で絞る。
   const days = [];
-  for (let day = ctx.start; day.getTime() <= ctx.end.getTime(); day = addDays_(day, 1)) {
+  const from = addDays_(ctx.start, -1);
+  const to = addDays_(ctx.end, 1);
+  for (let day = from; day.getTime() <= to.getTime(); day = addDays_(day, 1)) {
     if (weekdayOf_(day) < 5 && !federalHolidays_(day.getUTCFullYear())[dateKey_(day)]) {
       days.push(day);
     }
@@ -1876,7 +1897,7 @@ function providerEarnings_(ctx) {
       const rows = (payload.data && payload.data.rows) || [];
       rows.forEach(function (row) {
         const event = earningsEvent_(chunk[index], row, tickers);
-        if (event) events.push(event);
+        if (event && inDisplayWindow_(event.start, ctx)) events.push(event);
       });
     });
     if (failures >= EARNINGS_BATCH) {
@@ -1958,8 +1979,8 @@ function providerInvesting_(ctx) {
     payload.push('country%5B%5D=' + INVESTING_COUNTRY_IDS[code]);
   });
   [1, 2, 3].forEach(function (level) { payload.push('importance%5B%5D=' + level); });
-  payload.push('dateFrom=' + dateKey_(ctx.start));
-  payload.push('dateTo=' + dateKey_(ctx.end));
+  payload.push('dateFrom=' + dateKey_(addDays_(ctx.start, -1)));
+  payload.push('dateTo=' + dateKey_(addDays_(ctx.end, 1)));
   payload.push('timeZone=' + (CONFIG.investingTimezoneId || 55));
   payload.push('timeFilter=timeRemain');
   payload.push('currentTab=custom');
@@ -2034,8 +2055,7 @@ function investingRowsToEvents_(rows, ctx) {
     if (!indicator) return;
     const start = parseInvestingDate_(row.datetime, assumeTz);
     if (!start) return;
-    const day = localDate_(start, ctx.timezone);
-    if (day.getTime() < ctx.start.getTime() || day.getTime() > ctx.end.getTime()) return;
+    if (!inDisplayWindow_(start, ctx)) return;
 
     events.push(makeEvent_({
       indicatorId: indicator.id,
@@ -2101,8 +2121,14 @@ const PROP_FOMC_AUTO_MAILED = '_fomcAutoMailed';
 /** 取得結果はこの日数だけ使い回す（毎回取りに行く必要はない）。 */
 const FOMC_AUTO_TTL_DAYS = 7;
 
+/** 何も採用できなかったときのキャッシュ期間。復旧に早く追随するため短くする。 */
+const FOMC_AUTO_EMPTY_TTL_DAYS = 1;
+
 /** 手入力の日程がこの日数より先まであるなら、そもそも取りに行かない。 */
 const FOMC_AUTO_TRIGGER_DAYS = 180;
+
+/** 1回の実行のあいだは取得結果を使い回す（失敗も含めて1回で済ませる）。 */
+let FOMC_AUTO_MEMO_ = null;
 
 const MONTH_NAMES = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
@@ -2146,8 +2172,17 @@ function allMeetings_(bank) {
 
 /** 自動取得ぶんの会合日程（年 → 配列）。キャッシュ付き。 */
 function autoFomcMeetings_(curated) {
+  if (FOMC_AUTO_MEMO_) return FOMC_AUTO_MEMO_;
+  const result = fetchAutoFomcMeetings_(curated);
+  FOMC_AUTO_MEMO_ = result;
+  return result;
+}
+
+function fetchAutoFomcMeetings_(curated) {
   const cached = readAutoCache_();
-  const fresh = cached && (Date.now() - cached.fetchedAt) < FOMC_AUTO_TTL_DAYS * 86400000;
+  const ttlDays = cached && !Object.keys(cached.years).length
+    ? FOMC_AUTO_EMPTY_TTL_DAYS : FOMC_AUTO_TTL_DAYS;
+  const fresh = cached && (Date.now() - cached.fetchedAt) < ttlDays * 86400000;
   if (fresh) return cached.years;
   if (!needsAutoFomc_(curated)) return cached ? cached.years : {};
 
@@ -2391,13 +2426,32 @@ function maybeMailFomcSnippet_(accepted, curated) {
 /** 推定日と確定日がこの日数以内なら「同じ発表」とみなし、推定側を捨てる。 */
 const SUPERSEDE_WINDOW_DAYS = 12;
 
+/**
+ * 同期範囲の上限。設定を書き間違えて 9999 などにすると、何十年ぶんもの
+ * 発表日を展開しようとして実行時間の上限に当たり、毎回失敗するようになる。
+ * 設定の検証でも弾いているが、ここでも頭を押さえておく。
+ */
+const MAX_WINDOW_DAYS = 400;
+
 function syncWindow_(today) {
   const base = today || localDate_(new Date(), CONFIG.timezone);
+  const config = CONFIG.window || {};
+  const ahead = clampDays_(config.daysAhead, 60, 'window.daysAhead');
+  const back = clampDays_(config.daysBack, 5, 'window.daysBack');
   return {
-    start: addDays_(base, -(CONFIG.window.daysBack || 0)),
-    end: addDays_(base, CONFIG.window.daysAhead || 60),
+    start: addDays_(base, -back),
+    end: addDays_(base, ahead),
     timezone: CONFIG.timezone,
   };
+}
+
+function clampDays_(value, fallback, label) {
+  if (typeof value !== 'number' || !isFinite(value) || value < 0) return fallback;
+  if (value > MAX_WINDOW_DAYS) {
+    log_(label + ' が大きすぎるため ' + MAX_WINDOW_DAYS + ' 日に抑えました: ' + value);
+    return MAX_WINDOW_DAYS;
+  }
+  return Math.floor(value);
 }
 
 /**
@@ -2473,7 +2527,10 @@ function dropSupersededEstimates_(events, timezone) {
 
 /** ナスダック影響度その他の条件で選抜する。 */
 function applyFilter_(events) {
-  const filter = CONFIG.filter;
+  const filter = CONFIG.filter || {};
+  // 設定を消してしまったときに「全部消える」のが一番まずいので、
+  // しきい値が読めなければ既定値に落とす。
+  const minImpact = typeof filter.minImpact === 'number' ? filter.minImpact : 55;
   const include = filter.include || [];
   const exclude = filter.exclude || [];
   const countries = filter.countries || [];
@@ -2484,7 +2541,7 @@ function applyFilter_(events) {
     if (include.indexOf(event.indicatorId) !== -1) return true;
     if (countries.length && countries.indexOf(event.country) === -1) return false;
     if (categories.length && categories.indexOf(event.category) === -1) return false;
-    return event.impact >= filter.minImpact;
+    return event.impact >= minImpact;
   });
 }
 
@@ -2529,7 +2586,7 @@ function formatClock_(instant, timezone) {
   const date = ymd_(parts.year, parts.month, parts.day);
   return {
     date: parts.year + '/' + pad2_(parts.month) + '/' + pad2_(parts.day),
-    time: pad2_(parts.hour % 24) + ':' + pad2_(parts.minute),
+    time: pad2_(parts.hour) + ':' + pad2_(parts.minute),
     weekday: WEEKDAY_JA[weekdayOf_(date)],
     short: pad2_(parts.month) + '/' + pad2_(parts.day),
   };
@@ -2605,6 +2662,46 @@ function renderLine_(event) {
 
 const MAX_REMINDERS = 5;   // Google 側の上限
 
+/** 一時的な失敗を何回まで待って試し直すか。 */
+const CALENDAR_RETRIES = 4;
+
+/**
+ * カレンダー API をひとつ呼ぶ。
+ *
+ * 初回同期では 60〜130 件をまとめて書き込むので、レート制限や
+ * 一時的なバックエンドエラーに当たることがある。そこで落として同期全体を
+ * 失敗させると、その日のカレンダーが丸ごと古いままになるため、
+ * 待って試し直す。恒久的な失敗（権限不足、ID 重複など）はそのまま投げる。
+ */
+function calendarCall_(action) {
+  let delay = 1000;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return action();
+    } catch (err) {
+      if (attempt >= CALENDAR_RETRIES || !isRetriableError_(err)) throw err;
+      log_('カレンダー API が一時的に失敗（' + attempt + '回目）。'
+           + (delay / 1000) + '秒待って試し直します。');
+      sleep_(delay);
+      delay *= 2;
+    }
+  }
+}
+
+function isRetriableError_(err) {
+  const text = String(err && err.message ? err.message : err);
+  return /rate limit|rateLimit|quota|backend error|internal error|try again|timed? ?out|\b(429|500|502|503|504)\b/i
+    .test(text);
+}
+
+function sleep_(ms) {
+  try {
+    Utilities.sleep(ms);
+  } catch (err) {
+    // テスト環境などで sleep が無くても、再試行そのものは続ける。
+  }
+}
+
 function toCalendarResource_(event) {
   const timezone = CONFIG.timezone;
   const tier = eventTier_(event);
@@ -2656,17 +2753,22 @@ function toCalendarResource_(event) {
 function resolveCalendarId_(create) {
   if (CONFIG.calendar.id) return CONFIG.calendar.id;
 
-  const cached = prop_(PROP_CALENDAR_ID);
-  if (cached) return cached;
-
   const name = CONFIG.calendar.name;
+  // 名前を変えたのに古いカレンダーへ書き続けないよう、
+  // キャッシュは「そのとき探した名前」とセットで持つ。
+  const cached = prop_(PROP_CALENDAR_ID);
+  if (cached && prop_(PROP_CALENDAR_NAME) === name) return cached;
+  if (cached) forgetCalendarId_();
+
   let pageToken = null;
   do {
-    const page = Calendar.CalendarList.list({ maxResults: 250, pageToken: pageToken });
+    const page = calendarCall_(function () {
+      return Calendar.CalendarList.list({ maxResults: 250, pageToken: pageToken });
+    });
     const items = page.items || [];
     for (let i = 0; i < items.length; i++) {
       if (items[i].summary === name) {
-        props_().setProperty(PROP_CALENDAR_ID, items[i].id);
+        rememberCalendarId_(items[i].id, name);
         return items[i].id;
       }
     }
@@ -2678,13 +2780,48 @@ function resolveCalendarId_(create) {
   }
 
   log_('カレンダー「' + name + '」を作成します');
-  const created = Calendar.Calendars.insert({
-    summary: name,
-    description: CONFIG.calendar.description || '',
-    timeZone: CONFIG.timezone,
+  const created = calendarCall_(function () {
+    return Calendar.Calendars.insert({
+      summary: name,
+      description: CONFIG.calendar.description || '',
+      timeZone: CONFIG.timezone,
+    });
   });
-  props_().setProperty(PROP_CALENDAR_ID, created.id);
+  rememberCalendarId_(created.id, name);
   return created.id;
+}
+
+function rememberCalendarId_(id, name) {
+  try {
+    props_().setProperty(PROP_CALENDAR_ID, id);
+    props_().setProperty(PROP_CALENDAR_NAME, name);
+  } catch (err) {
+    log_('カレンダー ID を保存できませんでした（動作には影響しません）: ' + err);
+  }
+}
+
+function forgetCalendarId_() {
+  try {
+    props_().deleteProperty(PROP_CALENDAR_ID);
+    props_().deleteProperty(PROP_CALENDAR_NAME);
+  } catch (err) {
+    log_('カレンダー ID を消せませんでした: ' + err);
+  }
+}
+
+/**
+ * 覚えていたカレンダーが消されていた場合に、一度だけ探し直して やり直す。
+ * これが無いと、カレンダーを削除した瞬間から毎日失敗し続ける。
+ */
+function withCalendarRecovery_(action) {
+  try {
+    return action();
+  } catch (err) {
+    if (!isMissingError_(err) || !prop_(PROP_CALENDAR_ID)) throw err;
+    log_('覚えていたカレンダーが見つかりません。探し直します。');
+    forgetCalendarId_();
+    return action();
+  }
 }
 
 /** このツールが作った予定だけを列挙する。 */
@@ -2692,14 +2829,16 @@ function listManagedEvents_(calendarId, start, end) {
   const out = [];
   let pageToken = null;
   do {
-    const page = Calendar.Events.list(calendarId, {
-      timeMin: zonedTime_(start, '00:00', CONFIG.timezone).toISOString(),
-      timeMax: zonedTime_(addDays_(end, 1), '00:00', CONFIG.timezone).toISOString(),
-      singleEvents: true,
-      showDeleted: false,
-      maxResults: 2500,
-      privateExtendedProperty: MANAGED_KEY + '=' + MANAGED_VALUE,
-      pageToken: pageToken,
+    const page = calendarCall_(function () {
+      return Calendar.Events.list(calendarId, {
+        timeMin: zonedTime_(start, '00:00', CONFIG.timezone).toISOString(),
+        timeMax: zonedTime_(addDays_(end, 1), '00:00', CONFIG.timezone).toISOString(),
+        singleEvents: true,
+        showDeleted: false,
+        maxResults: 2500,
+        privateExtendedProperty: MANAGED_KEY + '=' + MANAGED_VALUE,
+        pageToken: pageToken,
+      });
     });
     (page.items || []).forEach(function (item) { if (item.id) out.push(item); });
     pageToken = page.nextPageToken;
@@ -2760,25 +2899,28 @@ function planChanges_(plan) {
 function applyPlan_(plan) {
   plan.created.forEach(function (row) {
     try {
-      Calendar.Events.insert(row.resource, plan.calendarId);
+      calendarCall_(function () {
+        return Calendar.Events.insert(row.resource, plan.calendarId);
+      });
     } catch (err) {
       // ID が既にある（期間外にあった、削除済みで残っていた等）場合は
       // 作り直さず更新して ID を使い回す。
-      if (isDuplicateIdError_(err)) {
-        Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
-      } else {
-        throw err;
-      }
+      if (!isDuplicateIdError_(err)) throw err;
+      calendarCall_(function () {
+        return Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
+      });
     }
   });
 
   plan.updated.forEach(function (row) {
-    Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
+    calendarCall_(function () {
+      return Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
+    });
   });
 
   plan.deleted.forEach(function (item) {
     try {
-      Calendar.Events.remove(plan.calendarId, item.id);
+      calendarCall_(function () { return Calendar.Events.remove(plan.calendarId, item.id); });
     } catch (err) {
       if (!isMissingError_(err)) throw err;   // 既に無いなら成功と同じ
     }
@@ -3040,11 +3182,103 @@ function sendMail_(subject, body) {
 
 const TRIGGER_HANDLER = 'syncCalendar';
 
+/** 同時実行を待つ上限。これを超えたらこの回は諦める（次の回で追いつく）。 */
+const LOCK_WAIT_MS = 30000;
+
+/**
+ * 設定を読んで、おかしければ「どこがどうおかしいか」を言って止まる。
+ *
+ * CONFIG は利用者が直接書き換える場所なので、消し方によっては
+ * 「Cannot read properties of undefined」のような、原因の分からない
+ * エラーになる。それだと放置運用では手の打ちようがない。
+ */
+function validateConfig_() {
+  const problems = [];
+
+  try {
+    tzParts_(new Date(), CONFIG.timezone);
+  } catch (err) {
+    problems.push('timezone が不正です: ' + CONFIG.timezone
+                  + '（例: Asia/Tokyo）');
+  }
+
+  const window = CONFIG.window;
+  if (!window || typeof window !== 'object') {
+    problems.push('window の設定がありません（daysAhead / daysBack）');
+  } else {
+    ['daysAhead', 'daysBack'].forEach(function (key) {
+      const value = window[key];
+      if (typeof value !== 'number' || value < 0 || value !== Math.floor(value)) {
+        problems.push('window.' + key + ' は 0 以上の整数にしてください: ' + value);
+      }
+    });
+    if (window.daysAhead > 400) problems.push('window.daysAhead は 400 日以内にしてください');
+  }
+
+  const calendar = CONFIG.calendar;
+  if (!calendar || typeof calendar !== 'object') {
+    problems.push('calendar の設定がありません（name か id）');
+  } else if (!calendar.id && !calendar.name) {
+    problems.push('calendar.name か calendar.id のどちらかは必要です');
+  }
+
+  const impact = CONFIG.filter && CONFIG.filter.minImpact;
+  if (typeof impact !== 'number' || impact < 0 || impact > 100) {
+    problems.push('filter.minImpact は 0〜100 の数値にしてください: ' + impact);
+  }
+
+  TIERS.forEach(function (tier) {
+    const list = (CONFIG.reminders || {})[tier];
+    if (list === undefined) return;
+    if (!Array.isArray(list)) {
+      problems.push('reminders.' + tier + ' は配列にしてください');
+      return;
+    }
+    list.forEach(function (minutes) {
+      if (typeof minutes !== 'number' || minutes < 0 || minutes > 40320) {
+        problems.push('reminders.' + tier + ' は 0〜40320 分の数値にしてください: ' + minutes);
+      }
+    });
+  });
+
+  const triggers = CONFIG.triggers;
+  if (!triggers || typeof triggers !== 'object') {
+    problems.push('triggers の設定がありません（morningHour / eveningHour）');
+  } else {
+    ['morningHour', 'eveningHour'].forEach(function (key) {
+      const hour = triggers[key];
+      if (typeof hour !== 'number' || hour < 0 || hour > 23) {
+        problems.push('triggers.' + key + ' は 0〜23 にしてください: ' + hour);
+      }
+    });
+  }
+
+  if (problems.length) {
+    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
+                    + problems.join('\n  - '));
+  }
+}
+
+/**
+ * 拡張サービスの Calendar API が有効かを確かめる。
+ * 有効化を忘れると "Calendar is not defined" としか出ず、原因に辿り着けない。
+ */
+function requireCalendarService_() {
+  if (typeof Calendar === 'undefined' || !Calendar.Events) {
+    throw new Error(
+      'Calendar API が有効になっていません。\n'
+      + 'エディタ左の [サービス] の ＋ から Calendar API を追加してください'
+      + '（識別子は Calendar のまま）。');
+  }
+}
+
 /**
  * 最初の1回。カレンダーを用意し、自動実行を仕掛け、初回同期まで済ませます。
  * 2回目以降に実行しても安全です（トリガーは重複しません）。
  */
 function setup() {
+  validateConfig_();
+  requireCalendarService_();
   const calendarId = resolveCalendarId_(true);
   installTriggers();
   const plan = syncCalendar();
@@ -3055,7 +3289,7 @@ function setup() {
     '─────────────────────────────',
     'カレンダー : ' + CONFIG.calendar.name,
     'ID         : ' + calendarId,
-    '同期結果   : ' + (plan ? planSummary_(plan) : '(失敗)'),
+    '同期結果   : ' + (plan ? planSummary_(plan) : '(別の実行中だったのでスキップ)'),
     '自動実行   : 毎日 ' + CONFIG.triggers.morningHour + '時ごろ / '
                  + CONFIG.triggers.eveningHour + '時ごろ',
     '',
@@ -3067,6 +3301,17 @@ function setup() {
 
 /** 自動実行の本体。 */
 function syncCalendar() {
+  validateConfig_();
+  requireCalendarService_();
+
+  // 手動実行と自動実行がぶつかっても、同じ書き込みを二重に投げないようにする。
+  // 取れなければ既に別の実行が同じ仕事をしているので、この回は何もしない。
+  const lock = acquireLock_();
+  if (!lock) {
+    log_('別の同期が実行中のため、この回はスキップします。');
+    return null;
+  }
+
   const ctx = syncWindow_();
   try {
     let events = collectEvents_(ctx);
@@ -3075,9 +3320,12 @@ function syncCalendar() {
     }
     events = events.concat(weeklyDigestEvents_(events, ctx));
 
-    const calendarId = resolveCalendarId_(true);
-    const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
-    const plan = applyPlan_(buildPlan_(calendarId, events, existing));
+    // カレンダーを消されていた場合に一度だけ探し直す。
+    const plan = withCalendarRecovery_(function () {
+      const calendarId = resolveCalendarId_(true);
+      const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
+      return applyPlan_(buildPlan_(calendarId, events, existing));
+    });
 
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
          + ' / ' + planSummary_(plan));
@@ -3089,6 +3337,27 @@ function syncCalendar() {
     log_('同期に失敗しました: ' + error);
     notifyFailure_(error);
     throw error;   // 実行履歴にも失敗として残す
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function acquireLock_() {
+  try {
+    const lock = LockService.getScriptLock();
+    return lock.tryLock(LOCK_WAIT_MS) ? lock : null;
+  } catch (err) {
+    // ロックが使えない環境でも、同期そのものは冪等なので続行する。
+    log_('排他ロックを使えませんでした（処理は続行します）: ' + err);
+    return { releaseLock: function () {} };
+  }
+}
+
+function releaseLock_(lock) {
+  try {
+    if (lock && lock.releaseLock) lock.releaseLock();
+  } catch (err) {
+    log_('ロックを解放できませんでした: ' + err);
   }
 }
 
@@ -3110,6 +3379,7 @@ function maybeSendWeeklyDigest_(events, ctx) {
 
 /** カレンダーに触らず、何が登録されるかをログに出す。 */
 function preview() {
+  validateConfig_();
   const ctx = syncWindow_();
   const events = collectEvents_(ctx);
   const counts = { S: 0, A: 0, B: 0, C: 0 };
@@ -3247,14 +3517,17 @@ function countTriggers_() {
 /** このツールが作った予定を、同期期間の範囲で削除する。 */
 function removeAllEvents() {
   const ctx = syncWindow_();
-  const calendarId = resolveCalendarId_(false);
-  const items = listManagedEvents_(calendarId, ctx.start, ctx.end);
-  items.forEach(function (item) {
-    try {
-      Calendar.Events.remove(calendarId, item.id);
-    } catch (err) {
-      if (!isMissingError_(err)) throw err;
-    }
+  const items = withCalendarRecovery_(function () {
+    const calendarId = resolveCalendarId_(false);
+    const found = listManagedEvents_(calendarId, ctx.start, ctx.end);
+    found.forEach(function (item) {
+      try {
+        calendarCall_(function () { return Calendar.Events.remove(calendarId, item.id); });
+      } catch (err) {
+        if (!isMissingError_(err)) throw err;
+      }
+    });
+    return found;
   });
   const message = items.length + ' 件を削除しました。';
   log_(message);
@@ -3355,11 +3628,19 @@ function runTests() {
     }
   });
 
+  check('設定に矛盾がない', function () {
+    validateConfig_();
+  });
+
   check('Calendar 拡張サービスが有効になっている', function () {
-    if (typeof Calendar === 'undefined' || !Calendar.Events) {
-      throw new Error('エディタ左の [サービス] から Calendar API を追加してください');
-    }
+    requireCalendarService_();
     Calendar.CalendarList.list({ maxResults: 1 });
+  });
+
+  check('多重実行の排他が使える', function () {
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) throw new Error('ロックを取得できませんでした');
+    lock.releaseLock();
   });
 
   check('タイムゾーン設定が CONFIG と一致している', function () {

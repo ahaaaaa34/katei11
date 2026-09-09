@@ -5,13 +5,32 @@
 /** 推定日と確定日がこの日数以内なら「同じ発表」とみなし、推定側を捨てる。 */
 const SUPERSEDE_WINDOW_DAYS = 12;
 
+/**
+ * 同期範囲の上限。設定を書き間違えて 9999 などにすると、何十年ぶんもの
+ * 発表日を展開しようとして実行時間の上限に当たり、毎回失敗するようになる。
+ * 設定の検証でも弾いているが、ここでも頭を押さえておく。
+ */
+const MAX_WINDOW_DAYS = 400;
+
 function syncWindow_(today) {
   const base = today || localDate_(new Date(), CONFIG.timezone);
+  const config = CONFIG.window || {};
+  const ahead = clampDays_(config.daysAhead, 60, 'window.daysAhead');
+  const back = clampDays_(config.daysBack, 5, 'window.daysBack');
   return {
-    start: addDays_(base, -(CONFIG.window.daysBack || 0)),
-    end: addDays_(base, CONFIG.window.daysAhead || 60),
+    start: addDays_(base, -back),
+    end: addDays_(base, ahead),
     timezone: CONFIG.timezone,
   };
+}
+
+function clampDays_(value, fallback, label) {
+  if (typeof value !== 'number' || !isFinite(value) || value < 0) return fallback;
+  if (value > MAX_WINDOW_DAYS) {
+    log_(label + ' が大きすぎるため ' + MAX_WINDOW_DAYS + ' 日に抑えました: ' + value);
+    return MAX_WINDOW_DAYS;
+  }
+  return Math.floor(value);
 }
 
 /**
@@ -87,7 +106,10 @@ function dropSupersededEstimates_(events, timezone) {
 
 /** ナスダック影響度その他の条件で選抜する。 */
 function applyFilter_(events) {
-  const filter = CONFIG.filter;
+  const filter = CONFIG.filter || {};
+  // 設定を消してしまったときに「全部消える」のが一番まずいので、
+  // しきい値が読めなければ既定値に落とす。
+  const minImpact = typeof filter.minImpact === 'number' ? filter.minImpact : 55;
   const include = filter.include || [];
   const exclude = filter.exclude || [];
   const countries = filter.countries || [];
@@ -98,6 +120,6 @@ function applyFilter_(events) {
     if (include.indexOf(event.indicatorId) !== -1) return true;
     if (countries.length && countries.indexOf(event.country) === -1) return false;
     if (categories.length && categories.indexOf(event.category) === -1) return false;
-    return event.impact >= filter.minImpact;
+    return event.impact >= minImpact;
   });
 }

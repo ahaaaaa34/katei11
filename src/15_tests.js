@@ -88,11 +88,19 @@ function runTests() {
     }
   });
 
+  check('設定に矛盾がない', function () {
+    validateConfig_();
+  });
+
   check('Calendar 拡張サービスが有効になっている', function () {
-    if (typeof Calendar === 'undefined' || !Calendar.Events) {
-      throw new Error('エディタ左の [サービス] から Calendar API を追加してください');
-    }
+    requireCalendarService_();
     Calendar.CalendarList.list({ maxResults: 1 });
+  });
+
+  check('多重実行の排他が使える', function () {
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) throw new Error('ロックを取得できませんでした');
+    lock.releaseLock();
   });
 
   check('タイムゾーン設定が CONFIG と一致している', function () {

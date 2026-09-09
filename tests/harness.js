@@ -35,11 +35,18 @@ function exportedNames(source) {
 // ---------------------------------------------------------------------------
 
 function makeStubs(overrides = {}) {
+  // `overrides.X || 既定` にすると、X: undefined を渡して「その API が
+  // 無い環境」を再現できない。キーの有無で判断する。
+  const pick = (name, fallback) => (name in overrides ? overrides[name] : fallback);
+
   const store = Object.assign({}, overrides.properties);
   const sentMail = [];
   const fetched = [];
+  const slept = [];
 
   const stubs = {
+    // 真夜中を 24 時と返す古い ICU を再現するために差し替えられるようにしておく。
+    Intl: pick('Intl', Intl),
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (key) => (key in store ? store[key] : null),
@@ -48,7 +55,7 @@ function makeStubs(overrides = {}) {
       }),
     },
     Logger: { log: overrides.log || (() => {}) },
-    UrlFetchApp: overrides.UrlFetchApp || {
+    UrlFetchApp: pick('UrlFetchApp', {
       fetch: (url, params) => {
         fetched.push({ url, params });
         throw new Error('テストではネットワークを使いません: ' + url);
@@ -57,20 +64,31 @@ function makeStubs(overrides = {}) {
         requests.forEach((r) => fetched.push(r));
         throw new Error('テストではネットワークを使いません');
       },
-    },
-    Calendar: overrides.Calendar || fakeCalendar(),
-    ScriptApp: overrides.ScriptApp || fakeScriptApp(),
+    }),
+    Calendar: pick('Calendar', fakeCalendar()),
+    ScriptApp: pick('ScriptApp', fakeScriptApp()),
     MailApp: { sendEmail: (to, subject, body) => sentMail.push({ to, subject, body }) },
+    LockService: pick('LockService', {
+      getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }),
+    }),
     Session: { getEffectiveUser: () => ({ getEmail: () => 'test@example.com' }) },
     Utilities: {
       // Intl が使える環境ではこちらは呼ばれない。保険経路の形だけ用意する。
       formatDate: () => { throw new Error('Utilities.formatDate は使われていません'); },
+      // 再試行の待ち時間はテストでは記録するだけで、実際には待たない。
+      sleep: (ms) => { slept.push(ms); },
     },
   };
-  return { stubs, store, sentMail, fetched };
+  return { stubs, store, sentMail, fetched, slept };
 }
 
-/** Calendar API v3（拡張サービス）の最小限の偽物。 */
+/**
+ * Calendar API v3（拡張サービス）の偽物。
+ *
+ * events.list は **実 API と同じく timeMin/timeMax を尊重する**。
+ * ここを手抜きして全件返していたせいで、「窓の端のイベントが一覧に出ず、
+ * 毎回作り直される」というバグをテストが素通りさせていた。
+ */
 function fakeCalendar(seed = {}) {
   const events = new Map(Object.entries(seed.events || {}));
   const calendars = (seed.calendarList || []).slice();
@@ -101,9 +119,14 @@ function fakeCalendar(seed = {}) {
     Events: {
       list: (calendarId, opts) => {
         calls.push(['events.list', opts]);
+        const min = opts.timeMin ? new Date(opts.timeMin).getTime() : -Infinity;
+        const max = opts.timeMax ? new Date(opts.timeMax).getTime() : Infinity;
         const items = [...events.values()].filter((item) => {
           const props = (item.extendedProperties && item.extendedProperties.private) || {};
-          return props.ecal === '1';
+          if (props.ecal !== '1') return false;
+          // 実 API と同じ交差判定（start < timeMax かつ end > timeMin）
+          const span = eventSpan(item);
+          return span.start < max && span.end > min;
         });
         return { items };
       },
@@ -134,6 +157,16 @@ function fakeCalendar(seed = {}) {
   return api;
 }
 
+/** 予定リソースから絶対時刻の範囲を取り出す（終日は日付だけを持つ）。 */
+function eventSpan(item) {
+  const parse = (side, fallbackHour) => {
+    if (side.dateTime) return new Date(side.dateTime).getTime();
+    // 終日イベントは表示タイムゾーンの深夜。テストは Asia/Tokyo 前提。
+    return new Date(side.date + 'T' + fallbackHour + ':00+09:00').getTime();
+  };
+  return { start: parse(item.start, '00:00'), end: parse(item.end, '00:00') };
+}
+
 function fakeScriptApp() {
   let triggers = [];
   return {
@@ -159,13 +192,13 @@ function fakeScriptApp() {
 /** ソースを読み込み、宣言済みシンボルを詰めたオブジェクトを返す。 */
 function loadGas(overrides = {}) {
   const source = readSource();
-  const { stubs, store, sentMail, fetched } = makeStubs(overrides);
+  const { stubs, store, sentMail, fetched, slept } = makeStubs(overrides);
   const names = Object.keys(stubs);
   const exportList = exportedNames(source).join(', ');
   const factory = new Function(...names, `${source}\nreturn { ${exportList} };`);
   const api = factory(...names.map((name) => stubs[name]));
   return Object.assign(api, {
-    _stubs: stubs, _store: store, _mail: sentMail, _fetched: fetched,
+    _stubs: stubs, _store: store, _mail: sentMail, _fetched: fetched, _slept: slept,
   });
 }
 

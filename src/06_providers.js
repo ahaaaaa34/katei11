@@ -11,14 +11,15 @@
 
 function providerRules_(ctx) {
   const events = [];
-  // ルールが範囲の端に落ちても取りこぼさないよう、前後1か月ぶん広げて展開する。
-  const from = addDays_(ctx.start, -31);
-  const to = addDays_(ctx.end, 31);
+  // 米東部の日付と表示タイムゾーンの日付は最大1日ずれる。取りこぼさない
+  // よう数日ぶん広げて展開し、最後に表示日で絞る。
+  const from = addDays_(ctx.start, -3);
+  const to = addDays_(ctx.end, 3);
 
   indicatorsWithRules_().forEach(function (indicator) {
     ruleDates_(indicator.schedule, from, to).forEach(function (date) {
-      if (date.getTime() < ctx.start.getTime() || date.getTime() > ctx.end.getTime()) return;
       const start = zonedTime_(date, indicator.time, indicatorTimezone_(indicator));
+      if (!inDisplayWindow_(start, ctx)) return;
       events.push(makeEvent_({
         indicatorId: indicator.id,
         title: indicator.name,
@@ -97,10 +98,7 @@ function providerFomc_(ctx) {
     });
   });
 
-  return events.filter(function (event) {
-    const day = localDate_(event.start, indicatorTimezone_(indicator_(event.indicatorId)));
-    return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
-  });
+  return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
 function fomcEvent_(indicator, day, impact, note, period, extra) {
@@ -135,10 +133,7 @@ function providerMarket_(ctx) {
     pushExpiries_(events, year);
     pushRebalance_(events, year);
   }
-  return events.filter(function (event) {
-    const day = localDate_(event.start, ctx.timezone);
-    return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
-  });
+  return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
 function pushClosures_(events, year, ctx) {

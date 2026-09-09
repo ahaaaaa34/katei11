@@ -132,6 +132,18 @@ function eventTier_(event) {
   return tierFor_(event.impact);
 }
 
+/**
+ * そのイベントが同期範囲に入るか。
+ *
+ * 判定は必ず「表示タイムゾーンでの日付」で行う。予定 ID も一覧取得の範囲も
+ * 表示タイムゾーン基準なので、生成側だけ米東部の日付で判定すると、窓の端の
+ * イベントが一覧に出てこず、毎回作り直しになる。
+ */
+function inDisplayWindow_(instant, ctx) {
+  const day = localDate_(instant, ctx.timezone);
+  return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
+}
+
 /** 表示日基準の同一性。1指標・1日でひとつ。 */
 function eventUid_(event, timezone) {
   return event.indicatorId + '@' + dateKey_(localDate_(event.start, timezone));

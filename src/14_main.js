@@ -13,11 +13,103 @@
 
 const TRIGGER_HANDLER = 'syncCalendar';
 
+/** 同時実行を待つ上限。これを超えたらこの回は諦める（次の回で追いつく）。 */
+const LOCK_WAIT_MS = 30000;
+
+/**
+ * 設定を読んで、おかしければ「どこがどうおかしいか」を言って止まる。
+ *
+ * CONFIG は利用者が直接書き換える場所なので、消し方によっては
+ * 「Cannot read properties of undefined」のような、原因の分からない
+ * エラーになる。それだと放置運用では手の打ちようがない。
+ */
+function validateConfig_() {
+  const problems = [];
+
+  try {
+    tzParts_(new Date(), CONFIG.timezone);
+  } catch (err) {
+    problems.push('timezone が不正です: ' + CONFIG.timezone
+                  + '（例: Asia/Tokyo）');
+  }
+
+  const window = CONFIG.window;
+  if (!window || typeof window !== 'object') {
+    problems.push('window の設定がありません（daysAhead / daysBack）');
+  } else {
+    ['daysAhead', 'daysBack'].forEach(function (key) {
+      const value = window[key];
+      if (typeof value !== 'number' || value < 0 || value !== Math.floor(value)) {
+        problems.push('window.' + key + ' は 0 以上の整数にしてください: ' + value);
+      }
+    });
+    if (window.daysAhead > 400) problems.push('window.daysAhead は 400 日以内にしてください');
+  }
+
+  const calendar = CONFIG.calendar;
+  if (!calendar || typeof calendar !== 'object') {
+    problems.push('calendar の設定がありません（name か id）');
+  } else if (!calendar.id && !calendar.name) {
+    problems.push('calendar.name か calendar.id のどちらかは必要です');
+  }
+
+  const impact = CONFIG.filter && CONFIG.filter.minImpact;
+  if (typeof impact !== 'number' || impact < 0 || impact > 100) {
+    problems.push('filter.minImpact は 0〜100 の数値にしてください: ' + impact);
+  }
+
+  TIERS.forEach(function (tier) {
+    const list = (CONFIG.reminders || {})[tier];
+    if (list === undefined) return;
+    if (!Array.isArray(list)) {
+      problems.push('reminders.' + tier + ' は配列にしてください');
+      return;
+    }
+    list.forEach(function (minutes) {
+      if (typeof minutes !== 'number' || minutes < 0 || minutes > 40320) {
+        problems.push('reminders.' + tier + ' は 0〜40320 分の数値にしてください: ' + minutes);
+      }
+    });
+  });
+
+  const triggers = CONFIG.triggers;
+  if (!triggers || typeof triggers !== 'object') {
+    problems.push('triggers の設定がありません（morningHour / eveningHour）');
+  } else {
+    ['morningHour', 'eveningHour'].forEach(function (key) {
+      const hour = triggers[key];
+      if (typeof hour !== 'number' || hour < 0 || hour > 23) {
+        problems.push('triggers.' + key + ' は 0〜23 にしてください: ' + hour);
+      }
+    });
+  }
+
+  if (problems.length) {
+    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
+                    + problems.join('\n  - '));
+  }
+}
+
+/**
+ * 拡張サービスの Calendar API が有効かを確かめる。
+ * 有効化を忘れると "Calendar is not defined" としか出ず、原因に辿り着けない。
+ */
+function requireCalendarService_() {
+  if (typeof Calendar === 'undefined' || !Calendar.Events) {
+    throw new Error(
+      'Calendar API が有効になっていません。\n'
+      + 'エディタ左の [サービス] の ＋ から Calendar API を追加してください'
+      + '（識別子は Calendar のまま）。');
+  }
+}
+
 /**
  * 最初の1回。カレンダーを用意し、自動実行を仕掛け、初回同期まで済ませます。
  * 2回目以降に実行しても安全です（トリガーは重複しません）。
  */
 function setup() {
+  validateConfig_();
+  requireCalendarService_();
   const calendarId = resolveCalendarId_(true);
   installTriggers();
   const plan = syncCalendar();
@@ -28,7 +120,7 @@ function setup() {
     '─────────────────────────────',
     'カレンダー : ' + CONFIG.calendar.name,
     'ID         : ' + calendarId,
-    '同期結果   : ' + (plan ? planSummary_(plan) : '(失敗)'),
+    '同期結果   : ' + (plan ? planSummary_(plan) : '(別の実行中だったのでスキップ)'),
     '自動実行   : 毎日 ' + CONFIG.triggers.morningHour + '時ごろ / '
                  + CONFIG.triggers.eveningHour + '時ごろ',
     '',
@@ -40,6 +132,17 @@ function setup() {
 
 /** 自動実行の本体。 */
 function syncCalendar() {
+  validateConfig_();
+  requireCalendarService_();
+
+  // 手動実行と自動実行がぶつかっても、同じ書き込みを二重に投げないようにする。
+  // 取れなければ既に別の実行が同じ仕事をしているので、この回は何もしない。
+  const lock = acquireLock_();
+  if (!lock) {
+    log_('別の同期が実行中のため、この回はスキップします。');
+    return null;
+  }
+
   const ctx = syncWindow_();
   try {
     let events = collectEvents_(ctx);
@@ -48,9 +151,12 @@ function syncCalendar() {
     }
     events = events.concat(weeklyDigestEvents_(events, ctx));
 
-    const calendarId = resolveCalendarId_(true);
-    const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
-    const plan = applyPlan_(buildPlan_(calendarId, events, existing));
+    // カレンダーを消されていた場合に一度だけ探し直す。
+    const plan = withCalendarRecovery_(function () {
+      const calendarId = resolveCalendarId_(true);
+      const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
+      return applyPlan_(buildPlan_(calendarId, events, existing));
+    });
 
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
          + ' / ' + planSummary_(plan));
@@ -62,6 +168,27 @@ function syncCalendar() {
     log_('同期に失敗しました: ' + error);
     notifyFailure_(error);
     throw error;   // 実行履歴にも失敗として残す
+  } finally {
+    releaseLock_(lock);
+  }
+}
+
+function acquireLock_() {
+  try {
+    const lock = LockService.getScriptLock();
+    return lock.tryLock(LOCK_WAIT_MS) ? lock : null;
+  } catch (err) {
+    // ロックが使えない環境でも、同期そのものは冪等なので続行する。
+    log_('排他ロックを使えませんでした（処理は続行します）: ' + err);
+    return { releaseLock: function () {} };
+  }
+}
+
+function releaseLock_(lock) {
+  try {
+    if (lock && lock.releaseLock) lock.releaseLock();
+  } catch (err) {
+    log_('ロックを解放できませんでした: ' + err);
   }
 }
 
@@ -83,6 +210,7 @@ function maybeSendWeeklyDigest_(events, ctx) {
 
 /** カレンダーに触らず、何が登録されるかをログに出す。 */
 function preview() {
+  validateConfig_();
   const ctx = syncWindow_();
   const events = collectEvents_(ctx);
   const counts = { S: 0, A: 0, B: 0, C: 0 };
@@ -220,14 +348,17 @@ function countTriggers_() {
 /** このツールが作った予定を、同期期間の範囲で削除する。 */
 function removeAllEvents() {
   const ctx = syncWindow_();
-  const calendarId = resolveCalendarId_(false);
-  const items = listManagedEvents_(calendarId, ctx.start, ctx.end);
-  items.forEach(function (item) {
-    try {
-      Calendar.Events.remove(calendarId, item.id);
-    } catch (err) {
-      if (!isMissingError_(err)) throw err;
-    }
+  const items = withCalendarRecovery_(function () {
+    const calendarId = resolveCalendarId_(false);
+    const found = listManagedEvents_(calendarId, ctx.start, ctx.end);
+    found.forEach(function (item) {
+      try {
+        calendarCall_(function () { return Calendar.Events.remove(calendarId, item.id); });
+      } catch (err) {
+        if (!isMissingError_(err)) throw err;
+      }
+    });
+    return found;
   });
   const message = items.length + ' 件を削除しました。';
   log_(message);

@@ -18,7 +18,9 @@ function providerFred_(ctx) {
     return [];
   }
 
-  const rows = fredReleaseDates_(apiKey, ctx.start, ctx.end);
+  // 米東部の発表日と表示タイムゾーンの日付は1日ずれることがあるので、
+  // 前後1日ぶん広く取ってから表示日で絞る。
+  const rows = fredReleaseDates_(apiKey, addDays_(ctx.start, -1), addDays_(ctx.end, 1));
   if (rows === null) return [];
 
   const events = [];
@@ -28,9 +30,8 @@ function providerFred_(ctx) {
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
-    if (day.getTime() < ctx.start.getTime() || day.getTime() > ctx.end.getTime()) return;
-
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
+    if (!inDisplayWindow_(start, ctx)) return;
     events.push(makeEvent_({
       indicatorId: indicator.id,
       title: indicator.name,
@@ -94,8 +95,12 @@ function providerEarnings_(ctx) {
   const tickers = CONFIG.earningsTickers || {};
   if (!Object.keys(tickers).length) return [];
 
+  // 16:15 ET の引け後決算は日本時間だと翌朝になる。窓の初日ぶんを取りこぼさない
+  // よう、米東部の日付では前後1日ぶん多めに見て、最後に表示日で絞る。
   const days = [];
-  for (let day = ctx.start; day.getTime() <= ctx.end.getTime(); day = addDays_(day, 1)) {
+  const from = addDays_(ctx.start, -1);
+  const to = addDays_(ctx.end, 1);
+  for (let day = from; day.getTime() <= to.getTime(); day = addDays_(day, 1)) {
     if (weekdayOf_(day) < 5 && !federalHolidays_(day.getUTCFullYear())[dateKey_(day)]) {
       days.push(day);
     }
@@ -113,7 +118,7 @@ function providerEarnings_(ctx) {
       const rows = (payload.data && payload.data.rows) || [];
       rows.forEach(function (row) {
         const event = earningsEvent_(chunk[index], row, tickers);
-        if (event) events.push(event);
+        if (event && inDisplayWindow_(event.start, ctx)) events.push(event);
       });
     });
     if (failures >= EARNINGS_BATCH) {
@@ -195,8 +200,8 @@ function providerInvesting_(ctx) {
     payload.push('country%5B%5D=' + INVESTING_COUNTRY_IDS[code]);
   });
   [1, 2, 3].forEach(function (level) { payload.push('importance%5B%5D=' + level); });
-  payload.push('dateFrom=' + dateKey_(ctx.start));
-  payload.push('dateTo=' + dateKey_(ctx.end));
+  payload.push('dateFrom=' + dateKey_(addDays_(ctx.start, -1)));
+  payload.push('dateTo=' + dateKey_(addDays_(ctx.end, 1)));
   payload.push('timeZone=' + (CONFIG.investingTimezoneId || 55));
   payload.push('timeFilter=timeRemain');
   payload.push('currentTab=custom');
@@ -271,8 +276,7 @@ function investingRowsToEvents_(rows, ctx) {
     if (!indicator) return;
     const start = parseInvestingDate_(row.datetime, assumeTz);
     if (!start) return;
-    const day = localDate_(start, ctx.timezone);
-    if (day.getTime() < ctx.start.getTime() || day.getTime() > ctx.end.getTime()) return;
+    if (!inDisplayWindow_(start, ctx)) return;
 
     events.push(makeEvent_({
       indicatorId: indicator.id,

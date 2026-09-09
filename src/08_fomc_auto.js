@@ -22,8 +22,14 @@ const PROP_FOMC_AUTO_MAILED = '_fomcAutoMailed';
 /** 取得結果はこの日数だけ使い回す（毎回取りに行く必要はない）。 */
 const FOMC_AUTO_TTL_DAYS = 7;
 
+/** 何も採用できなかったときのキャッシュ期間。復旧に早く追随するため短くする。 */
+const FOMC_AUTO_EMPTY_TTL_DAYS = 1;
+
 /** 手入力の日程がこの日数より先まであるなら、そもそも取りに行かない。 */
 const FOMC_AUTO_TRIGGER_DAYS = 180;
+
+/** 1回の実行のあいだは取得結果を使い回す（失敗も含めて1回で済ませる）。 */
+let FOMC_AUTO_MEMO_ = null;
 
 const MONTH_NAMES = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
@@ -67,8 +73,17 @@ function allMeetings_(bank) {
 
 /** 自動取得ぶんの会合日程（年 → 配列）。キャッシュ付き。 */
 function autoFomcMeetings_(curated) {
+  if (FOMC_AUTO_MEMO_) return FOMC_AUTO_MEMO_;
+  const result = fetchAutoFomcMeetings_(curated);
+  FOMC_AUTO_MEMO_ = result;
+  return result;
+}
+
+function fetchAutoFomcMeetings_(curated) {
   const cached = readAutoCache_();
-  const fresh = cached && (Date.now() - cached.fetchedAt) < FOMC_AUTO_TTL_DAYS * 86400000;
+  const ttlDays = cached && !Object.keys(cached.years).length
+    ? FOMC_AUTO_EMPTY_TTL_DAYS : FOMC_AUTO_TTL_DAYS;
+  const fresh = cached && (Date.now() - cached.fetchedAt) < ttlDays * 86400000;
   if (fresh) return cached.years;
   if (!needsAutoFomc_(curated)) return cached ? cached.years : {};
 

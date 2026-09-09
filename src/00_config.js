@@ -92,6 +92,7 @@ const PROP_FRED_KEY = 'FRED_API_KEY';
 const PROP_WEBHOOK_URL = 'WEBHOOK_URL';
 const PROP_LAST_MAINTENANCE_MAIL = '_lastMaintenanceMail';
 const PROP_CALENDAR_ID = '_calendarId';
+const PROP_CALENDAR_NAME = '_calendarName';
 
 /** カレンダーに書き込んだ予定の目印（これが付いた予定だけを管理する）。 */
 const MANAGED_KEY = 'ecal';

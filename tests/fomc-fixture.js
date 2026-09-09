@@ -37,14 +37,27 @@ const VALID_YEAR_HTML = panel(2027, [
   meetingRow('December', '14-15', true),
 ]);
 
+/**
+ * 手入力（02_meetings.js）と**同じ年だが違う日付**の、検証を通る年。
+ * これが無いと「手入力を上書きしない」保証を試せない
+ * （検証に落ちる年を置いても、上書きされないのは当たり前になってしまう）。
+ */
+const CURATED_YEAR_HTML = panel(2026, [
+  meetingRow('January', '20-21', false),
+  meetingRow('March', '10-11', true),
+  meetingRow('April', '14-15', false),
+  meetingRow('June', '9-10', true),
+  meetingRow('July', '14-15', false),
+  meetingRow('September', '8-9', true),
+  meetingRow('October', '20-21', false),
+  meetingRow('December', '1-2', true),
+]);
+
 const PAGE_HTML = '<html><head><title>FOMC</title>'
   + '<style>.x{color:red}</style><script>var a=1;</script></head><body>'
   + '<h2>Meeting calendars and information</h2>'
-  + panel(2026, [
-      meetingRow('January', '27-28', false),
-      meetingRow('March', '17-18', true),
-    ])
+  + CURATED_YEAR_HTML
   + VALID_YEAR_HTML
   + '<p>Historical Materials by Year</p></body></html>';
 
-module.exports = { meetingRow, panel, VALID_YEAR_HTML, PAGE_HTML };
+module.exports = { meetingRow, panel, VALID_YEAR_HTML, CURATED_YEAR_HTML, PAGE_HTML };

@@ -56,7 +56,7 @@ function tzOffsetMinutes_(instant, timezone) {
   try {
     const parts = tzParts_(instant, timezone);
     const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day,
-                           parts.hour % 24, parts.minute, parts.second);
+                           parts.hour, parts.minute, parts.second);
     return Math.round((asUTC - instant.getTime()) / 60000);
   } catch (err) {
     // Intl が使えない環境向けの保険（GAS 標準 API）。
@@ -76,6 +76,9 @@ function tzParts_(instant, timezone) {
   formatter.formatToParts(instant).forEach(function (part) {
     if (part.type !== 'literal') out[part.type] = parseInt(part.value, 10);
   });
+  // ICU の版によっては真夜中を 24 時と返す。ここで 0 に寄せておかないと
+  // 呼び出し側それぞれで % 24 を書く羽目になり、書き忘れが必ず起きる。
+  out.hour = out.hour % 24;
   return out;
 }
 
