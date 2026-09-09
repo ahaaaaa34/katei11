@@ -13,6 +13,7 @@ from .collect import collect, window_dates
 from .config import OFFLINE_ENV, Config
 from .digest import digest_text, weekly_events
 from .gcal import AuthError, CalendarClient, run_oauth_flow
+from .health import ACTION, as_text, maintenance_report, needs_action
 from .models import EconEvent
 from .notify import send as send_webhook
 from .providers import build_providers
@@ -81,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_auth.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
 
     sub.add_parser("doctor", help="設定・認証・データ源の状態を点検する")
+    p_maint = sub.add_parser(
+        "maintenance", help="人手が要る項目だけを報告する（放置運用の見張り用）"
+    )
+    p_maint.add_argument(
+        "--strict", action="store_true",
+        help="情報レベルの指摘でも終了コード 3 を返す",
+    )
+    p_notify = sub.add_parser("notify", help="設定した Webhook に任意のメッセージを送る")
+    p_notify.add_argument("text", help="送信する本文")
+
     sub.add_parser("calendars", help="アクセスできるカレンダー一覧を表示する")
     sub.add_parser("indicators", help="指標カタログを影響度順に表示する")
     return parser
@@ -194,6 +205,16 @@ def cmd_auth(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_notify(config: Config, args: argparse.Namespace) -> int:
+    """CI の失敗通知などから使う汎用の送信口。"""
+    if send_webhook(config, args.text):
+        print("Webhook に送信しました。")
+        return 0
+    env = config.get("digest.webhook_url_env")
+    print(f"{WARN} {env} が未設定のため送信しませんでした。")
+    return 0
+
+
 def cmd_calendars(config: Config, args: argparse.Namespace) -> int:
     client = CalendarClient(config)
     for item in client.list_calendars():
@@ -217,6 +238,15 @@ def cmd_indicators(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_maintenance(config: Config, args: argparse.Namespace) -> int:
+    """CI から呼ぶ想定。手当てが要るときだけ終了コード 3 を返す。"""
+    findings = maintenance_report(config)
+    print(as_text(findings))
+    if needs_action(findings) or (args.strict and findings):
+        return 3
+    return 0
+
+
 def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     problems = 0
     print(f"econ-calendar {__version__}\n")
@@ -233,26 +263,20 @@ def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
     names = [p.name for p in build_providers(config)]
     print(f"{OK} 有効な取得元 : {', '.join(names) if names else 'なし'}"
           + ("（オフラインモード）" if config.offline else ""))
-    for optional, env in (("fred", "FRED_API_KEY"), ("investing", None)):
-        if optional not in names:
-            hint = (
-                f"（{env} を設定すると発表日が公式値になります）"
-                if env
-                else "（予想値・結果値が入ります）"
-            )
-            print(f"{WARN} {optional} が無効です {hint}")
 
     meetings = load_meetings()
     for bank in ("fomc", "boj", "ecb"):
         entries = (meetings.get(bank) or {}).get("meetings") or []
-        if not entries:
-            print(f"{WARN} {bank.upper()} の日程が未登録です (econ_cal/data/meetings.yaml)")
-            continue
-        last = max(m["date"] for m in entries)
-        marker = OK if last >= end else WARN
-        if last < end:
-            problems += 1
-        print(f"{marker} {bank.upper()} 日程   : {last} まで登録済み")
+        state = f"{max(m['date'] for m in entries)} まで登録済み" if entries else "未登録"
+        print(f"{OK if entries else WARN} {bank.upper():5} 日程 : {state}")
+
+    findings = maintenance_report(config)
+    if findings:
+        print()
+        for finding in findings:
+            marker = BAD if finding.severity == ACTION else WARN
+            print(f"{marker} {finding.render()}")
+        problems += sum(1 for f in findings if f.severity == ACTION)
 
     print()
     try:
@@ -299,7 +323,9 @@ COMMANDS = {
     "purge": cmd_purge,
     "auth": cmd_auth,
     "doctor": cmd_doctor,
+    "maintenance": cmd_maintenance,
     "calendars": cmd_calendars,
+    "notify": cmd_notify,
     "indicators": cmd_indicators,
 }
 

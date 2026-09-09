@@ -26,6 +26,7 @@
 | **指標以外の重要日も** | 米国市場の休場・短縮取引・SQ・指数リバランス・主要ハイテク銘柄の決算日 |
 | **週次まとめ** | 月曜に「今週の注目指標 6件（最重要 3件）」という終日予定を自動作成 |
 | **毎日自動更新** | GitHub Actions で 1 日 2 回。予定の変更・追加・削除まで面倒を見る |
+| **放置しても壊れない** | 同期の失敗は Webhook 通知、日程データの期限切れは Issue で自動報告、cron の 60 日自動停止も keepalive で回避 |
 | **何度実行しても安全** | イベント ID を内容から決めているので、重複が絶対に増えない（冪等） |
 
 ---
@@ -55,6 +56,9 @@ python -m econ_cal indicators       # 指標カタログを影響度順に表示
 3. 「API とサービス」→「OAuth 同意画面」
    - User Type: **外部**
    - テストユーザーに**自分の Gmail アドレスを追加**（これを忘れると認可時に弾かれます）
+   - ⚠️ **そのあと「アプリを公開」を押して「本番環境」にしてください。**
+     「テスト」のままだとトークンが 7 日で失効し、自動更新が1週間で止まります
+     （→ [放置運用について](#放置運用について)）
 4. 「認証情報」→「認証情報を作成」→ **OAuth クライアント ID**
    - アプリケーションの種類: **デスクトップアプリ**
 5. JSON をダウンロードし、このディレクトリに `credentials.json` として保存
@@ -88,11 +92,69 @@ python -m econ_cal sync             # 実際に登録
 **平日 20:00 JST**（発表結果の取り込み）に動きます。
 Actions タブから手動実行（`--dry-run` 付き）もできます。
 
+失敗したら Webhook に通知が飛び、メンテナンスが必要になったら Issue が自動で立ちます。
+詳しくは [放置運用について](#放置運用について) を読んでください（**7日で切れる罠**があります）。
+
 **自分のマシンで cron を回す場合**
 
 ```cron
 0 6 * * *  cd /path/to/econ-calendar && /usr/bin/python3 -m econ_cal sync --quiet
 ```
+
+---
+
+## 放置運用について
+
+日々の同期は完全に自動です。ただし**放置を壊す要因が3つ**あり、
+うち2つは仕掛けで潰し、1つは通知で拾うようにしてあります。
+
+| | 自動か | 対策 |
+|---|---|---|
+| 毎日の同期（追加・更新・削除） | ✅ 完全自動 | GitHub Actions が1日2回 |
+| 発表結果の取り込み | ✅ 完全自動 | 平日夕方の回が過去5日分を再同期 |
+| 同期の失敗 | ✅ 自動で通知 | Webhook に飛ぶ（＋ Actions の失敗メール） |
+| スケジュールの60日自動停止 | ✅ 自動回避 | keepalive が延命（下記） |
+| **OAuth トークンの失効** | ⚠️ **初回設定が必要** | 下記の「7日で切れる罠」 |
+| FOMC 日程の年1回の追記 | ⚠️ 年1回 2分 | 期限が近づくと Issue が自動で立つ |
+
+### ⚠️ 7日で切れる罠（これだけは最初に必ず）
+
+Google の OAuth 同意画面が **「テスト」** のままだと、リフレッシュトークンが
+**7日で失効**します。放置していると1週間でカレンダーが止まります。
+
+**Google Cloud Console → OAuth 同意画面 → 「アプリを公開」→ 本番環境** にしてください。
+
+自分だけが使う個人利用なら、Google の審査は不要です。認可時に
+「このアプリは確認されていません」という警告が出ますが、
+「詳細」→「（アプリ名）に移動」で進めます。**本番環境にすればトークンは失効しません**
+（自分で取り消すか、6か月間まったく使わなかった場合を除く）。
+
+公開ステータスを変えたら `python -m econ_cal auth` をもう一度実行して、
+新しい `token.json` を `GOOGLE_TOKEN_JSON` に入れ直してください。
+
+### 60日ルール
+
+GitHub は**公開リポジトリ**のスケジュール実行を、**60日間コミットが無いと自動停止**します
+（このリポジトリは公開設定です）。対策として、最終コミットから40日以上経っていたら
+`.github/last-run.txt` を更新する小さなコミットを自動で入れます。
+年に数回コミットが増えるだけで、実行は止まりません。
+
+- 止めたい場合: リポジトリの Variables に `ECON_CAL_KEEPALIVE=off` を設定
+- より確実にしたい場合: **リポジトリを private にする**（この制限は公開リポジトリのみ）
+
+### 年1回だけ手を動かすところ
+
+FOMC の会合日程は Fed が公表したものを `econ_cal/data/meetings.yaml` に手入力しています。
+日程が同期範囲に対して足りなくなる前に、**Issue が自動で立ちます**。
+
+> ❗ FOMC の会合日程が 2026-12-09 で切れます（あと 55 日 / 同期範囲の末尾は 2026-12-14）。
+> → https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm を見て追記してください。
+
+公式ページから8行コピーして追記し、Issue を閉じるだけです。
+同じ Issue が既に開いていれば作り直さないので、通知が溢れることはありません。
+
+ここを自動化（Fed のサイトをスクレイプ）することもできますが、**間違った金利発表日が
+静かに入る**リスクの方が、年1回2分の手作業より高くつくと判断して入れていません。
 
 ---
 
@@ -177,6 +239,8 @@ python -m econ_cal sync          # カレンダーへ同期
 python -m econ_cal sync --dry-run# 差分だけ表示して書き込まない
 python -m econ_cal digest        # 今週のまとめを表示（--post で Webhook 送信）
 python -m econ_cal doctor        # 設定・認証・データ源の点検
+python -m econ_cal maintenance   # 人手が要る項目だけ報告（要対応なら終了コード 3）
+python -m econ_cal notify "..."  # Webhook に任意のメッセージを送る
 python -m econ_cal calendars     # アクセスできるカレンダー一覧
 python -m econ_cal purge         # このツールが作った予定を削除
 python -m econ_cal auth          # Google の認可
@@ -190,10 +254,13 @@ python -m econ_cal auth          # Google の認可
 
 ## メンテナンス
 
+`python -m econ_cal maintenance` が「人手が要ること」だけを報告します。
+CI もこれを見て Issue を立てるので、普段は放っておいて構いません
+（→ [放置運用について](#放置運用について)）。
+
 **年に一度、FOMC の日程を追記してください。**
 [Fed の公式ページ](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm)を見て
-`econ_cal/data/meetings.yaml` に足すだけです。登録が同期期間より手前で切れていると
-`doctor` と同期実行時に警告が出ます。
+`econ_cal/data/meetings.yaml` に足すだけです。
 
 同じファイルで日銀・ECB の会合日程も登録できます（既定は空。investing プロバイダを
 有効にすれば自動で入ります）。
@@ -207,7 +274,7 @@ python -m econ_cal auth          # Google の認可
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 146 テスト・ネットワーク不要
+python -m pytest        # 159 テスト・ネットワーク不要
 ruff check econ_cal tests
 ```
 
@@ -220,6 +287,7 @@ econ_cal/
   sync.py           カレンダーとの差分計算
   gcal.py           Google Calendar API
   digest.py         週次まとめ
+  health.py         放置運用のための自己点検
   providers/        rules / fomc / market / fred / investing / earnings
   data/
     indicators.yaml 指標カタログ（影響度・発表時刻・解説）
