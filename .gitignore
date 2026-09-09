@@ -1,0 +1,18 @@
+# 認証情報 — 絶対にコミットしないこと
+credentials.json
+token.json
+.env
+*.pem
+
+# 個人設定（config.example.yaml をコピーして使う）
+config.yaml
+config.yml
+
+# キャッシュ・成果物
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.ruff_cache/

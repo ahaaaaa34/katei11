@@ -1,0 +1,37 @@
+# ===========================================================================
+#  中央銀行の会合日程（手動メンテナンス）
+# ---------------------------------------------------------------------------
+#  FRB は約2年先まで公式に日程を公表している。年に一度、下記 URL を見て
+#  追記すること。`python -m econ_cal doctor` が期限切れを警告する。
+#
+#    FOMC : https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#    日銀 : https://www.boj.or.jp/mopo/mpmsche_minu/index.htm
+#    ECB  : https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+#
+#  date : 政策金利が発表される日（2日間開催なら2日目）
+#  sep  : true なら経済見通し(SEP)・ドットチャートが同時公表される会合
+#         → 影響度が一段上がり、記者会見の重みも増す
+# ===========================================================================
+version: 1
+
+fomc:
+  verify_url: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+  meetings:
+    - {date: 2026-01-28, sep: false}
+    - {date: 2026-03-18, sep: true}
+    - {date: 2026-04-29, sep: false}
+    - {date: 2026-06-17, sep: true}
+    - {date: 2026-07-29, sep: false}
+    - {date: 2026-09-16, sep: true}
+    - {date: 2026-10-28, sep: false}
+    - {date: 2026-12-09, sep: true}
+
+# 日銀・ECB は年ごとに日程を確認して追記する。
+# 空のままでも動作する（Investing プロバイダを有効にすれば自動取得される）。
+boj:
+  verify_url: https://www.boj.or.jp/mopo/mpmsche_minu/index.htm
+  meetings: []
+
+ecb:
+  verify_url: https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+  meetings: []
