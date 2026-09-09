@@ -1,18 +1,8 @@
-# 認証情報 — 絶対にコミットしないこと
-credentials.json
-token.json
-.env
-*.pem
+# clasp の認証情報とプロジェクト設定
+.clasp.json
+.clasprc.json
 
-# 個人設定（config.example.yaml をコピーして使う）
-config.yaml
-config.yml
-
-# キャッシュ・成果物
-.cache/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
-venv/
-.ruff_cache/
+# 作業用
+node_modules/
+*.log
+.DS_Store

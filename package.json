@@ -1,0 +1,13 @@
+{
+  "name": "econ-calendar-gas",
+  "version": "2.0.0",
+  "description": "ナスダックに影響する経済指標を Google カレンダーへ自動同期する Apps Script",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run.js",
+    "bundle": "node tools/bundle.js",
+    "push": "npm run bundle && clasp push",
+    "check": "npm test && npm run bundle"
+  },
+  "engines": { "node": ">=18" }
+}

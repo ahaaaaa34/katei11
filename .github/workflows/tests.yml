@@ -6,17 +6,19 @@ on:
   pull_request:
 
 jobs:
-  pytest:
+  node:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        node-version: ["18", "20", "22"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
-      - run: python -m pytest -q
+          node-version: ${{ matrix.node-version }}
+      - name: テスト
+        run: npm test
+      - name: 単一ファイル版が生成できること
+        run: npm run bundle
+      - name: 生成物が最新であること
+        run: git diff --exit-code dist/Code.gs
