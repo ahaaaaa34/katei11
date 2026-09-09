@@ -43,6 +43,9 @@ function providerRules_(ctx) {
 // ---------------------------------------------------------------------------
 
 const MINUTES_LAG_DAYS = 21;      // 議事要旨は会合2日目の3週間後
+const AUTO_ORIGIN_NOTE =
+  '\n\n※ この会合日程は Fed の公式ページから自動取得したものです'
+  + '（手入力の日程が尽きた先の年）。';
 const BEIGE_BOOK_LEAD_DAYS = 14;  // ベージュブックは会合の2週間前
 
 function providerFomc_(ctx) {
@@ -54,10 +57,11 @@ function providerFomc_(ctx) {
   const events = [];
 
   Object.keys(banks).forEach(function (bank) {
-    const section = MEETINGS[bank] || {};
-    (section.meetings || []).forEach(function (meeting) {
+    allMeetings_(bank).forEach(function (meeting) {
       const day = parseDateKey_(meeting.date);
       const sep = !!meeting.sep;
+      // 自動取得ぶんは、どこから来た日程かを説明文に残す。
+      const origin = meeting.auto ? AUTO_ORIGIN_NOTE : '';
 
       const rate = indicator_(banks[bank].rate);
       if (!rate) return;
@@ -66,26 +70,28 @@ function providerFomc_(ctx) {
         note += '\n【ドットチャート公表回】経済見通し(SEP)が同時発表される会合。' +
                 '利下げ回数の織り込みが一気に書き換わるため、通常会合より値動きが大きい。';
       }
-      events.push(fomcEvent_(rate, day, rate.impact, note, null, { sep: sep, bank: bank }));
+      events.push(fomcEvent_(rate, day, rate.impact, note + origin, null,
+                             { sep: sep, bank: bank, auto: !!meeting.auto }));
 
       const presser = banks[bank].presser ? indicator_(banks[bank].presser) : null;
       if (presser) {
         events.push(fomcEvent_(presser, day, Math.min(100, presser.impact + (sep ? 2 : 0)),
-                               presser.why, null, { sep: sep }));
+                               presser.why + origin, null,
+                               { sep: sep, auto: !!meeting.auto }));
       }
 
       if (bank === 'fomc') {
         const minutes = indicator_('us_fomc_minutes');
         if (minutes) {
           events.push(fomcEvent_(minutes, addDays_(day, MINUTES_LAG_DAYS), minutes.impact,
-                                 minutes.why,
+                                 minutes.why + origin,
                                  day.getUTCFullYear() + '年' + (day.getUTCMonth() + 1) + '月' +
                                  day.getUTCDate() + '日会合分'));
         }
         const beige = indicator_('us_beige_book');
         if (beige) {
           events.push(fomcEvent_(beige, addDays_(day, -BEIGE_BOOK_LEAD_DAYS), beige.impact,
-                                 beige.why));
+                                 beige.why + origin));
         }
       }
     });

@@ -36,6 +36,9 @@ const CONFIG = {
   providers: {
     rules: true,     // 発表日のルール計算（通信不要）
     fomc: true,      // FOMC など中央銀行会合
+    // 手入力の会合日程が尽きた先の年を、Fed の公式ページから補う。
+    // 手入力がある年は絶対に上書きしません（false にすると手入力のみ）。
+    fomcAutoFetch: true,
     market: true,    // 休場・短縮取引・SQ・指数リバランス
     // FRED は無料 API キーで発表日が公式の確定値になります。
     // https://fred.stlouisfed.org/docs/api/api_key.html

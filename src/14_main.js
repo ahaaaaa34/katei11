@@ -7,6 +7,7 @@
  *   showStatus()        設定・情報源・メンテナンス状況の確認
  *   removeAllEvents()   このツールが作った予定を削除する
  *   uninstall()         自動実行を止める（予定は残ります）
+ *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   runTests()          日付計算などの自己テスト
  */
 
@@ -102,8 +103,9 @@ function preview() {
 /** 設定と情報源の状態、手当てが要る項目を表示する。 */
 function showStatus() {
   const ctx = syncWindow_();
+  // fomcAutoFetch は情報源ではなく fomc の挙動スイッチなので、ここには並べない。
   const enabled = Object.keys(CONFIG.providers).filter(function (name) {
-    return CONFIG.providers[name];
+    return CONFIG.providers[name] && name !== 'fomcAutoFetch';
   });
   const lines = [
     'タイムゾーン : ' + CONFIG.timezone,
@@ -112,12 +114,69 @@ function showStatus() {
     '指標カタログ : ' + INDICATORS.length + ' 件（うちルール展開 '
                     + indicatorsWithRules_().length + ' 件）',
     '有効な情報源 : ' + enabled.join(', '),
+    'FOMC 日程    : ' + meetingCoverage_(),
     'FRED キー    : ' + (prop_(PROP_FRED_KEY) ? '設定済み' : '未設定'),
     'Webhook      : ' + (prop_(PROP_WEBHOOK_URL) ? '設定済み' : '未設定'),
     '自動実行     : ' + countTriggers_() + ' 件',
     '',
     maintenanceText_(maintenanceReport_(ctx)),
   ];
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+function meetingCoverage_() {
+  const meetings = allMeetings_('fomc');
+  if (!meetings.length) return '未登録';
+  let manual = '', auto = '';
+  meetings.forEach(function (meeting) {
+    if (meeting.auto) { if (meeting.date > auto) auto = meeting.date; }
+    else if (meeting.date > manual) manual = meeting.date;
+  });
+  return '手入力 ' + (manual || 'なし') + ' まで'
+       + (auto ? ' / 自動取得 ' + auto + ' まで' : '');
+}
+
+/**
+ * FOMC 日程の自動取得が実際にどう動くかを見る。
+ * 公式ページの作りが変わっていないか、たまに確認するのに使う。
+ */
+function checkFomcAutoFetch() {
+  const lines = ['取得先: ' + FOMC_CALENDAR_URL, ''];
+  const html = fetchText_(FOMC_CALENDAR_URL);
+  if (html === null) {
+    lines.push('❌ ページを取得できませんでした（手入力の日程だけで動きます）');
+    const text = lines.join('\n');
+    log_(text);
+    return text;
+  }
+
+  let years = {};
+  try {
+    years = parseFomcCalendar_(html);
+  } catch (err) {
+    lines.push('❌ 解釈できませんでした: ' + err);
+  }
+
+  const found = Object.keys(years).sort();
+  if (!found.length) {
+    lines.push('❌ 会合日程を見つけられませんでした（ページの作りが変わった可能性）');
+  }
+  found.forEach(function (year) {
+    const problem = validateFomcYear_(years[year], Number(year));
+    lines.push((problem ? '❌ ' : '✅ ') + year + ' 年  ' + years[year].length + ' 回'
+               + (problem ? '  → 採用しません: ' + problem : ''));
+    lines.push('     ' + years[year].map(function (m) {
+      return m.date + (m.sep ? '*' : '');
+    }).join('  '));
+  });
+
+  lines.push('');
+  lines.push('* 印は経済見通し(SEP)が同時公表される回。');
+  lines.push('現在の状態: ' + meetingCoverage_());
+  lines.push('手入力（02_meetings.js）がある年は、取得結果があっても使いません。');
+
   const text = lines.join('\n');
   log_(text);
   return text;

@@ -18,7 +18,7 @@ function maintenanceReport_(ctx) {
 
   [['fomc', 'FOMC'], ['boj', '日銀'], ['ecb', 'ECB']].forEach(function (pair) {
     const section = MEETINGS[pair[0]] || {};
-    const entries = section.meetings || [];
+    const entries = allMeetings_(pair[0]);
     if (!entries.length) {
       // 未登録は既定の状態なので、FOMC 以外は騒がない。
       if (pair[0] === 'fomc') {
@@ -33,9 +33,10 @@ function maintenanceReport_(ctx) {
     }
 
     let last = parseDateKey_(entries[0].date);
+    let auto = false;
     entries.forEach(function (entry) {
       const date = parseDateKey_(entry.date);
-      if (date.getTime() > last.getTime()) last = date;
+      if (date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
     });
 
     if (last.getTime() < deadline.getTime()) {
@@ -47,6 +48,16 @@ function maintenanceReport_(ctx) {
         message: pair[1] + ' の会合日程が ' + dateKey_(last) + ' で切れます（'
                + when + ' / 同期範囲の末尾は ' + dateKey_(ctx.end) + '）。',
         fix: section.verify_url + ' を見て 02_meetings.js に翌年分を追記してください。',
+      });
+    } else if (auto) {
+      // 公式ページからの自動取得で足りている状態。動いてはいるが、
+      // 取得はページの作りに依存するので、転記を促しておく。
+      findings.push({
+        key: 'meetings:' + pair[0] + ':auto',
+        severity: SEVERITY_INFO,
+        message: pair[1] + ' の会合日程は ' + dateKey_(last)
+               + ' まで自動取得で埋まっています（手入力ではありません）。',
+        fix: '確実にするなら、届いたメールの内容を 02_meetings.js に貼り付けてください。',
       });
     }
   });

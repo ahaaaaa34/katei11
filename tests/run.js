@@ -938,4 +938,232 @@ suite('入口と自動実行', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('FOMC 日程の自動取得', () => {
+  const { PAGE_HTML, VALID_YEAR_HTML, panel, meetingRow } = require('./fomc-fixture');
+
+  function serving(html, properties) {
+    return loadGas({
+      properties,
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 200, getContentText: () => html }),
+      },
+    });
+  }
+
+  test('公式ページから年ごとの日程を取り出す', () => {
+    const years = G.parseFomcCalendar_(PAGE_HTML);
+    eq(Object.keys(years).sort(), ['2026', '2027']);
+    eq(years[2027].length, 8);
+  });
+
+  test('政策金利が出るのは会合の最終日', () => {
+    eq(G.parseFomcCalendar_(PAGE_HTML)[2027][0].date, '2027-01-27', 'Jan 26-27 → 27日');
+  });
+
+  test('アスタリスクを SEP として読む', () => {
+    const meetings = G.parseFomcCalendar_(PAGE_HTML)[2027];
+    eq(meetings.filter((m) => m.sep).map((m) => m.date),
+       ['2027-03-17', '2027-06-16', '2027-09-22', '2027-12-15']);
+  });
+
+  test('アスタリスクが読めなければ月で当てる', () => {
+    const html = panel(2027, [
+      meetingRow('January', '26-27'), meetingRow('March', '16-17'),
+      meetingRow('April', '27-28'), meetingRow('June', '15-16'),
+      meetingRow('July', '27-28'), meetingRow('September', '21-22'),
+      meetingRow('November', '2-3'), meetingRow('December', '14-15'),
+    ]);
+    const meetings = G.parseFomcCalendar_(html)[2027];
+    eq(meetings.filter((m) => m.sep).map((m) => m.date.slice(5, 7)),
+       ['03', '06', '09', '12']);
+  });
+
+  test('月をまたぐ回は後ろの月で解釈する', () => {
+    eq(G.parseFomcYear_(G.htmlToText_('<div>April/May</div><div>28-1</div>'), 2027),
+       [{ date: '2027-05-01', sep: false }]);
+  });
+
+  test('月名がひとつでも日が戻っていれば翌月とみなす', () => {
+    eq(G.parseFomcYear_('April 28-1', 2027)[0].date, '2027-05-01');
+  });
+
+  test('まともな年は検査を通る', () => {
+    eq(G.validateFomcYear_(G.parseFomcCalendar_(VALID_YEAR_HTML)[2027], 2027), null);
+  });
+
+  test('会合数がおかしい年は落とす', () => {
+    const few = [{ date: '2027-01-27' }, { date: '2027-03-17' }];
+    ok(/会合数/.test(G.validateFomcYear_(few, 2027)));
+  });
+
+  test('土日に落ちる日程は落とす', () => {
+    const meetings = G.parseFomcCalendar_(VALID_YEAR_HTML)[2027];
+    meetings[0].date = '2027-01-30';   // 土曜
+    ok(/曜日/.test(G.validateFomcYear_(meetings, 2027)));
+  });
+
+  test('年が違う日付は落とす', () => {
+    const meetings = G.parseFomcCalendar_(VALID_YEAR_HTML)[2027];
+    meetings[0].date = '2028-01-26';
+    ok(/年でない/.test(G.validateFomcYear_(meetings, 2027)));
+  });
+
+  test('間隔がおかしい年は落とす', () => {
+    const meetings = G.parseFomcCalendar_(VALID_YEAR_HTML)[2027];
+    meetings[1].date = '2027-01-20';   // 1月に2回
+    ok(/間隔/.test(G.validateFomcYear_(meetings, 2027)));
+  });
+
+  test('日付の重複は落とす', () => {
+    const meetings = G.parseFomcCalendar_(VALID_YEAR_HTML)[2027];
+    meetings[1].date = meetings[0].date;
+    ok(/重複/.test(G.validateFomcYear_(meetings, 2027)));
+  });
+
+  test('手入力が尽きた先の年だけを補う', () => {
+    const api = serving(PAGE_HTML);
+    const merged = api.allMeetings_('fomc');
+    const auto = merged.filter((m) => m.auto);
+    eq(auto.length, 8, '2027 年ぶんだけ入る');
+    ok(auto.every((m) => m.date.indexOf('2027') === 0));
+    eq(merged.filter((m) => !m.auto).length, 8, '手入力の 2026 年は 8 件のまま');
+  });
+
+  test('手入力がある年は絶対に上書きしない', () => {
+    const api = serving(PAGE_HTML);
+    const curated = api.MEETINGS.fomc.meetings.map((m) => m.date);
+    const merged = api.allMeetings_('fomc').filter((m) => m.date.indexOf('2026') === 0);
+    eq(merged.map((m) => m.date), curated);
+    ok(merged.every((m) => !m.auto));
+  });
+
+  test('検査に落ちた年は取り込まない', () => {
+    const broken = panel(2027, [
+      meetingRow('January', '26-27'), meetingRow('February', '2-3'),
+      meetingRow('March', '16-17'), meetingRow('April', '27-28'),
+      meetingRow('June', '15-16'), meetingRow('July', '27-28'),
+      meetingRow('September', '21-22'), meetingRow('December', '14-15'),
+    ]);
+    const api = serving(broken);
+    eq(api.allMeetings_('fomc').filter((m) => m.auto).length, 0, '間隔が詰まった年は捨てる');
+  });
+
+  test('取得に失敗しても手入力ぶんで動き続ける', () => {
+    const api = loadGas({
+      UrlFetchApp: { fetch: () => { throw new Error('network down'); } },
+    });
+    eq(api.allMeetings_('fomc').length, 8);
+  });
+
+  test('中身が HTML でなくても壊れない', () => {
+    const api = serving('<html><body>メンテナンス中です</body></html>');
+    eq(api.allMeetings_('fomc').filter((m) => m.auto).length, 0);
+  });
+
+  test('取得結果はキャッシュされ、毎回は取りに行かない', () => {
+    let calls = 0;
+    const api = loadGas({
+      UrlFetchApp: {
+        fetch: () => {
+          calls++;
+          return { getResponseCode: () => 200, getContentText: () => PAGE_HTML };
+        },
+      },
+    });
+    api.allMeetings_('fomc');
+    api.allMeetings_('fomc');
+    api.allMeetings_('fomc');
+    eq(calls, 1);
+  });
+
+  test('手入力が十分先まであるなら取りに行かない', () => {
+    let calls = 0;
+    const api = loadGas({
+      UrlFetchApp: { fetch: () => { calls++; throw new Error('呼ばれてはいけない'); } },
+    });
+    api.MEETINGS.fomc.meetings.push({ date: '2099-12-15', sep: true });
+    api.allMeetings_('fomc');
+    eq(calls, 0);
+  });
+
+  test('自動取得を切れば手入力だけになる', () => {
+    const api = serving(PAGE_HTML);
+    api.CONFIG.providers.fomcAutoFetch = false;
+    eq(api.allMeetings_('fomc').filter((m) => m.auto).length, 0);
+  });
+
+  test('新しい年を取り込んだら貼り付け用のメールを1度だけ送る', () => {
+    const api = serving(PAGE_HTML);
+    api.allMeetings_('fomc');
+    eq(api._mail.length, 1);
+    ok(api._mail[0].subject.indexOf('2027') !== -1);
+    ok(api._mail[0].body.indexOf("{ date: '2027-01-27', sep: false },") !== -1,
+       '貼り付けられる形になっていること');
+    api._store[api.PROP_FOMC_AUTO] = '';   // キャッシュを消して再取得させる
+    api.allMeetings_('fomc');
+    eq(api._mail.length, 1, '同じ年で二度は送らない');
+  });
+
+  test('自動取得ぶんの予定には出所が書かれる', () => {
+    const api = serving(PAGE_HTML);
+    const ctx = { start: Y(2027, 3, 1), end: Y(2027, 3, 31), timezone: 'Asia/Tokyo' };
+    const rate = api.providerFomc_(ctx).find((e) => e.indicatorId === 'us_fomc_rate');
+    eq(K(api.localDate_(rate.start, 'America/New_York')), '2027-03-17');
+    eq(rate.extra.auto, true);
+    ok(rate.note.indexOf('自動取得') !== -1);
+    eq(rate.estimated, false, '公式ページ由来なので推定ではない');
+  });
+
+  test('自動取得で埋まっている間は「転記を促す」情報を出す', () => {
+    const api = serving(PAGE_HTML, { FRED_API_KEY: 'dummy' });
+    const report = api.maintenanceReport_({ start: Y(2026, 9, 4), end: Y(2026, 11, 8) });
+    const auto = report.find((f) => f.key === 'meetings:fomc:auto');
+    ok(auto, '自動取得で足りている旨の指摘が出ること');
+    eq(auto.severity, api.SEVERITY_INFO);
+    eq(api.needsAction_(report), false, 'メールで叩き起こすほどではない');
+  });
+
+  test('自動取得も失敗すれば従来どおり要対応になる', () => {
+    const api = loadGas({
+      properties: { FRED_API_KEY: 'dummy' },
+      UrlFetchApp: { fetch: () => { throw new Error('down'); } },
+    });
+    const report = api.maintenanceReport_({ start: Y(2026, 10, 10), end: Y(2026, 12, 14) });
+    eq(api.needsAction_(report), true);
+  });
+});
+
+suite('診断コマンド', () => {
+  const { PAGE_HTML } = require('./fomc-fixture');
+
+  test('checkFomcAutoFetch が採用可否を年ごとに示す', () => {
+    const api = loadGas({
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 200, getContentText: () => PAGE_HTML }),
+      },
+    });
+    const text = api.checkFomcAutoFetch();
+    ok(text.indexOf('✅ 2027 年') !== -1, text);
+    ok(text.indexOf('2027-03-17*') !== -1, 'SEP に印が付くこと');
+  });
+
+  test('取得できなければその旨を返す', () => {
+    const api = loadGas({ UrlFetchApp: { fetch: () => { throw new Error('down'); } } });
+    ok(api.checkFomcAutoFetch().indexOf('取得できませんでした') !== -1);
+  });
+
+  test('showStatus は日程の出所を分けて表示する', () => {
+    const api = loadGas({
+      ScriptApp: fakeScriptApp(),
+      UrlFetchApp: {
+        fetch: () => ({ getResponseCode: () => 200, getContentText: () => PAGE_HTML }),
+      },
+    });
+    const text = api.showStatus();
+    ok(/手入力 2026-12-09 まで \/ 自動取得 2027-/.test(text), text);
+    ok(text.indexOf('fomcAutoFetch') === -1, '挙動スイッチを情報源として並べない');
+  });
+});
+
 process.exitCode = require('./assert').report();

@@ -12,38 +12,14 @@ const MEETINGS = {
   fomc: {
     verify_url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
     meetings: [
-      {
-        date: "2026-01-28",
-        sep: false
-      },
-      {
-        date: "2026-03-18",
-        sep: true
-      },
-      {
-        date: "2026-04-29",
-        sep: false
-      },
-      {
-        date: "2026-06-17",
-        sep: true
-      },
-      {
-        date: "2026-07-29",
-        sep: false
-      },
-      {
-        date: "2026-09-16",
-        sep: true
-      },
-      {
-        date: "2026-10-28",
-        sep: false
-      },
-      {
-        date: "2026-12-09",
-        sep: true
-      }
+      { date: '2026-01-28', sep: false },
+      { date: '2026-03-18', sep: true },
+      { date: '2026-04-29', sep: false },
+      { date: '2026-06-17', sep: true },
+      { date: '2026-07-29', sep: false },
+      { date: '2026-09-16', sep: true },
+      { date: '2026-10-28', sep: false },
+      { date: '2026-12-09', sep: true }
     ]
   },
   boj: {
