@@ -7,6 +7,7 @@
 
 import atexit
 import re
+import signal
 import subprocess
 import sys
 
@@ -74,6 +75,14 @@ MUTATIONS = [
      "  problems.push.apply(problems, catalogProblems_());", ""),
     ("孤立サロゲートをそのまま符号化する", "src/03_util.js",
      "    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;", ""),
+    ("組み立て後ではなくイベントからハッシュを取る", "src/11_sync.js",
+     "  resource.extendedProperties.private.hash = resourceContentHash_(resource);",
+     "  resource.extendedProperties.private.hash = eventContentHash_(event);"),
+    ("実測時刻より慣例値を優先する", "src/05_catalog.js",
+     "  if (!merged.exactTime && low.exactTime) {", "  if (false) {"),
+    ("終日への変換をやめる", "src/11_sync.js",
+     "  if (event.allDay || CONFIG.display.allDay) {",
+     "  if (event.allDay) {"),
     ("推定日の間引きをやめる", "src/09_collect.js",
      "      if (Math.abs(daysBetween_(day, known[i])) <= SUPERSEDE_WINDOW_DAYS) return false;",
      ""),
@@ -103,6 +112,19 @@ def restore_all(originals):
         open(path, "w", encoding="utf-8").write(source)
 
 
+def install_signal_guards(originals):
+    """kill されても書き戻す。atexit だけではシグナルで抜けたときに走らない。"""
+    def handler(signum, frame):
+        restore_all(originals)
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
 def main():
     # 途中で強制終了されても作業ツリーを汚さない。finally だけでは
     # SIGKILL に対応できないので、git でも復元できることを確かめておく。
@@ -122,6 +144,7 @@ def main():
         originals.setdefault(path, open(path, encoding="utf-8").read())
     # 例外でも Ctrl-C でも、確実に書き戻す
     atexit.register(restore_all, originals)
+    install_signal_guards(originals)
 
     missed = []
     try:

@@ -67,7 +67,6 @@ function toCalendarResource_(event) {
       private: {
         ecal: MANAGED_VALUE,
         uid: eventUid_(event, timezone),
-        hash: eventContentHash_(event),
         indicator: event.indicatorId,
         impact: String(event.impact),
         source: event.source,
@@ -75,7 +74,7 @@ function toCalendarResource_(event) {
     },
   };
 
-  if (event.allDay) {
+  if (event.allDay || CONFIG.display.allDay) {
     const day = localDate_(event.start, timezone);
     resource.start = { date: dateKey_(day) };
     resource.end = { date: dateKey_(addDays_(day, 1)) };
@@ -89,7 +88,25 @@ function toCalendarResource_(event) {
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };
   }
+
+  resource.extendedProperties.private.hash = resourceContentHash_(resource);
   return resource;
+}
+
+/**
+ * 実際にカレンダーへ書き込む内容そのもののハッシュ。
+ *
+ * イベントの生データではなく組み立て後の姿を見るのがだいじで、そうしないと
+ * 表示設定（終日にする・絵文字をやめる等）を変えても「変化なし」と判定され、
+ * 既存の予定が古い見た目のまま残り続ける。
+ */
+function resourceContentHash_(resource) {
+  const payload = JSON.stringify([
+    resource.summary, resource.description, resource.start, resource.end,
+    resource.colorId || null, resource.reminders, resource.transparency,
+    resource.source || null,
+  ]);
+  return sha1Hex_(payload).slice(0, 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +243,7 @@ function buildPlan_(calendarId, events, existing, ctx) {
     const current = byId[resource.id];
     if (!current) {
       plan.created.push({ event: event, resource: resource });
-    } else if (storedHash_(current) === eventContentHash_(event)) {
+    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {
       plan.unchanged.push(event);
     } else {
       plan.updated.push({ event: event, resource: resource });

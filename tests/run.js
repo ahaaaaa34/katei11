@@ -535,11 +535,18 @@ suite('突き合わせと選抜', () => {
 
 // ---------------------------------------------------------------------------
 suite('カレンダーへの反映', () => {
-  function stored(api, ev) {
+  // カレンダー側に既にある状態を、実際に書き込まれる姿から作る。
+  function stored(api, ev, over) {
     const resource = api.toCalendarResource_(ev);
-    return { id: resource.id, summary: resource.summary,
-             extendedProperties: { private: { ecal: '1',
-               hash: api.eventContentHash_(ev) } } };
+    return {
+      id: resource.id,
+      summary: resource.summary,
+      start: resource.start,
+      end: resource.end,
+      extendedProperties: {
+        private: Object.assign({}, resource.extendedProperties.private, over),
+      },
+    };
   }
 
   function withCalendar(seed) {
@@ -564,7 +571,7 @@ suite('カレンダーへの反映', () => {
 
   test('通知はランクごとに変わる', () => {
     eq(G.toCalendarResource_(event(G, { impact: 98 })).reminders.overrides
-        .map((r) => r.minutes), [1440, 30]);
+        .map((r) => r.minutes), [1440, 30], '最重要は前日と30分前');
     eq(G.toCalendarResource_(event(G, { impact: 60 })).reminders.overrides, []);
   });
 
@@ -594,9 +601,7 @@ suite('カレンダーへの反映', () => {
     const { api } = withCalendar();
     const before = event(api);
     const after = event(api, { actual: '0.4%' });
-    const stale = stored(api, before);
-    stale.extendedProperties.private.hash = 'stale';
-    const plan = api.buildPlan_('cal-123', [after], [stale]);
+    const plan = api.buildPlan_('cal-123', [after], [stored(api, before)]);
     eq(plan.updated.length, 1);
     eq(plan.created.length, 0);
   });
@@ -698,11 +703,15 @@ suite('表示', () => {
     ok(title.indexOf('予定日未確定') === -1 && title.indexOf('0.2%') !== -1);
   });
 
-  test('説明文に数値・現地時刻・解説が入る', () => {
+  test('説明文に数値と解説が入る', () => {
     const text = G.renderDescription_(event(G, {
       forecast: '0.3%', previous: '0.2%', actual: '0.4%', note: '効き方の説明' }));
-    ['予想  0.3%', '前回  0.2%', '結果  0.4%', 'ET)', '効き方の説明', G.MARKER]
+    ['予想  0.3%', '前回  0.2%', '結果  0.4%', '効き方の説明', G.MARKER]
       .forEach((needle) => ok(text.indexOf(needle) !== -1, needle));
+  });
+
+  test('現地時刻も併記する', () => {
+    ok(G.renderDescription_(event(G)).indexOf('ET)') !== -1);
   });
 
   test('数値が無ければその欄を出さない', () => {
@@ -1198,7 +1207,8 @@ suite('回帰: 窓の端で予定が作り直される', () => {
     const api = offline(loadGas());
     const outside = [];
     // 窓は短くしてよい。ここで見たいのは端の扱いで、端の日付は1日ずつ動かす。
-    for (let offset = 0; offset < 365; offset += 1) {
+    // 1日おきでも、曜日・月末・夏時間の両切替はすべて境界に来る。
+    for (let offset = 0; offset < 365; offset += 2) {
       const start = G.addDays_(Y(2026, 1, 1), offset);
       const end = G.addDays_(start, 6);
       const ctx = { start, end, timezone: 'Asia/Tokyo' };
@@ -1945,6 +1955,231 @@ suite('回帰: 書き間違いが黙って通る', () => {
     api.INDICATORS[0].time = '99:99';
     const report = api.runTests();
     ok(report.indexOf('❌ 指標カタログの書式') !== -1, report);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('終日の予定にする設定', () => {
+  function offline(api, allDay) {
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    api.CONFIG.display.allDay = allDay !== false;
+    return api;
+  }
+
+  test('既定は時刻つき', () => {
+    const api = loadGas();
+    eq(api.CONFIG.display.allDay, false);
+    ok(api.toCalendarResource_(event(api)).start.dateTime);
+  });
+
+  test('allDay を立てるとすべて終日になる', () => {
+    const api = offline(loadGas());
+    const events = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                        timezone: 'Asia/Tokyo' });
+    ok(events.length > 20);
+    events.forEach((e) => {
+      const resource = api.toCalendarResource_(e);
+      eq(Object.keys(resource.start), ['date'], e.indicatorId);
+      eq(resource.end.date, K(G.addDays_(G.parseDateKey_(resource.start.date), 1)));
+    });
+  });
+
+  test('日付は表示タイムゾーンのもの', () => {
+    const api = offline(loadGas());
+    const fomc = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                      timezone: 'Asia/Tokyo' })
+      .find((e) => e.indicatorId === 'us_fomc_rate');
+    // 9/16 14:00 ET は日本時間 9/17 未明
+    eq(api.toCalendarResource_(fomc).start.date, '2026-09-17');
+  });
+
+  test('米国日付とずれるときだけ、説明文に米国日付を併記する', () => {
+    const api = offline(loadGas());
+    const events = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                        timezone: 'Asia/Tokyo' });
+    const fomc = events.find((e) => e.indicatorId === 'us_fomc_rate');
+    const cpi = events.find((e) => e.indicatorId === 'us_cpi');
+    ok(api.renderDescription_(fomc).indexOf('米国時間 2026/09/16') !== -1,
+       'ずれるものは併記する');
+    ok(api.renderDescription_(cpi).indexOf('米国時間') === -1,
+       '同じ日ならわざわざ書かない');
+  });
+
+  test('一覧表示から時刻が消える', () => {
+    const api = offline(loadGas());
+    const line = api.renderLine_(event(api, { title: 'CPI' }));
+    ok(!/\d{2}:\d{2}/.test(line), line);
+    ok(line.indexOf('CPI') !== -1);
+  });
+
+  test('戻せば時刻つきになる', () => {
+    const api = offline(loadGas(), false);
+    const resource = api.toCalendarResource_(event(api));
+    ok(resource.start.dateTime, '時刻つきになること');
+    ok(/\d{2}:\d{2}/.test(api.renderLine_(event(api))), '一覧にも時刻が出ること');
+  });
+
+  test('終日に切り替えても予定は作り直されない', () => {
+    // uid は「指標id@表示日」なので、表示形式を変えても同じ予定を指す。
+    const timed = loadGas();
+    const allDay = loadGas();
+    allDay.CONFIG.display.allDay = true;
+    const sample = { indicatorId: 'us_cpi', title: 'CPI', impact: 98,
+                     start: G.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') };
+    sample.end = new Date(sample.start.getTime() + 1800000);
+
+    const a = timed.toCalendarResource_(timed.makeEvent_(sample));
+    const b = allDay.toCalendarResource_(allDay.makeEvent_(sample));
+    eq(a.id, b.id, '予定 ID は同じ（＝更新になる）');
+    ok(a.extendedProperties.private.hash !== b.extendedProperties.private.hash,
+       '中身は変わるので更新は走る');
+  });
+
+  test('もともと終日のもの（休場・週次まとめ）はそのまま', () => {
+    const api = offline(loadGas());
+    const holiday = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                         timezone: 'Asia/Tokyo' })
+      .find((e) => e.indicatorId === 'market_holiday');
+    eq(api.toCalendarResource_(holiday).start.date, '2026-09-07');
+    ok(api.renderDescription_(holiday).indexOf('米国時間') === -1);
+  });
+
+  test('終日でも連続実行で重複しない', () => {
+    const calendar = fakeCalendar();
+    const api = offline(loadGas({
+      Calendar: calendar,
+      properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+    }));
+    for (let day = 0; day < 30; day++) {
+      const today = G.addDays_(Y(2026, 9, 1), day);
+      const ctx = { start: G.addDays_(today, -5), end: G.addDays_(today, 60),
+                    timezone: 'Asia/Tokyo' };
+      let events = api.collectEvents_(ctx);
+      events = events.concat(api.weeklyDigestEvents_(events, ctx));
+      api.applyPlan_(api.buildPlan_('c', events,
+        api.listManagedEvents_('c', ctx.start, ctx.end), ctx));
+    }
+    const byUid = {};
+    [...calendar.events.values()].forEach((item) => {
+      const uid = item.extendedProperties.private.uid;
+      byUid[uid] = (byUid[uid] || 0) + 1;
+    });
+    eq(Object.entries(byUid).filter((pair) => pair[1] > 1), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('発表時刻の出どころ', () => {
+  const day = Y(2026, 9, 11);
+  const at = (hhmm) => G.zonedTime_(day, hhmm, 'America/New_York');
+  const make = (api, over) => api.makeEvent_(Object.assign({
+    indicatorId: 'us_cpi', title: 'CPI', impact: 98,
+    start: at('08:30'), end: at('09:00'),
+  }, over));
+
+  test('FRED は発表日しか持たないので、時刻はカタログの慣例値になる', () => {
+    const api = loadGas({
+      properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: {
+        fetch: () => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            count: 1,
+            release_dates: [{ release_id: 10, release_name: 'Consumer Price Index',
+                              date: '2026-09-11' }],
+          }),
+        }),
+      },
+    });
+    const found = api.providerFred_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                      timezone: 'Asia/Tokyo' })[0];
+    eq(api.formatClock_(found.start, 'America/New_York').time, '08:30');
+    eq(found.exactTime, false, '慣例値であることを記録しておく');
+  });
+
+  test('Investing は実際の発表時刻を持つ', () => {
+    const html = '<tr data-event-datetime="2026/09/11 12:45:00">'
+      + '<td class="left event">Core CPI (MoM)</td></tr>';
+    const events = G.investingRowsToEvents_(G.parseInvestingRows_(html),
+      { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' });
+    eq(events[0].exactTime, true);
+  });
+
+  test('日付は FRED、時刻は実測値、という取り方になる', () => {
+    const api = loadGas();
+    const fromFred = make(api, { source: 'fred' });
+    const fromSite = make(api, { source: 'investing', exactTime: true,
+                                 forecast: '0.3%', start: at('08:45'), end: at('09:15') });
+    const merged = api.mergeEvent_(fromFred, fromSite);
+    eq(merged.source, 'fred', '日付の確度は FRED を採る');
+    eq(api.formatClock_(merged.start, 'America/New_York').time, '08:45',
+       '時刻は実測値に譲る');
+    eq(merged.forecast, '0.3%');
+  });
+
+  test('合成の順番によらず同じ結果になる', () => {
+    const api = loadGas();
+    const a = make(api, { source: 'fred' });
+    const b = make(api, { source: 'investing', exactTime: true, start: at('08:45'),
+                          end: at('09:15') });
+    eq(api.mergeEvent_(a, b).start.toISOString(), api.mergeEvent_(b, a).start.toISOString());
+  });
+
+  test('どちらも慣例値なら優先順位どおり', () => {
+    const api = loadGas();
+    const rules = make(api, { source: 'rules', start: at('09:00'), end: at('09:30') });
+    const fred = make(api, { source: 'fred' });
+    eq(api.formatClock_(api.mergeEvent_(rules, fred).start, 'America/New_York').time,
+       '08:30');
+  });
+
+  test('慣例値のときだけ、説明文にそう書く', () => {
+    const api = loadGas();
+    ok(api.renderDescription_(make(api, { source: 'fred' })).indexOf('時刻は慣例値') !== -1);
+    ok(api.renderDescription_(make(api, { source: 'investing', exactTime: true }))
+       .indexOf('時刻は慣例値') === -1);
+  });
+
+  test('終日にしたときは時刻の話をしない', () => {
+    const api = loadGas();
+    api.CONFIG.display.allDay = true;
+    ok(api.renderDescription_(make(api, { source: 'fred' })).indexOf('時刻は慣例値') === -1);
+  });
+
+  test('Investing を有効にすると、時刻も数値も入った予定になる', () => {
+    const html = '<tr data-event-datetime="2026/09/11 12:45:00">'
+      + '<td class="left event"><a href="/x">Core CPI (MoM)&nbsp;<span>(Aug)</span></a></td>'
+      + '<td id="eventActual_1">0.2%</td><td id="eventForecast_1">0.3%</td>'
+      + '<td id="eventPrevious_1">0.4%</td></tr>';
+    const api = loadGas({
+      properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: {
+        fetch: (url) => ({
+          getResponseCode: () => 200,
+          getContentText: () => (url.indexOf('stlouisfed') !== -1
+            ? JSON.stringify({ count: 1, release_dates: [
+                { release_id: 10, release_name: 'Consumer Price Index',
+                  date: '2026-09-11' }] })
+            : JSON.stringify({ data: html })),
+        }),
+      },
+    });
+    api.CONFIG.providers.rules = false;
+    api.CONFIG.providers.fomc = false;
+    api.CONFIG.providers.market = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    api.CONFIG.providers.investing = true;
+
+    const events = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                        timezone: 'Asia/Tokyo' });
+    const cpi = events.find((e) => e.indicatorId === 'us_cpi');
+    eq(api.formatClock_(cpi.start, 'America/New_York').time, '08:45', '実測の時刻');
+    eq([cpi.forecast, cpi.previous, cpi.actual], ['0.3%', '0.4%', '0.2%']);
+    eq(cpi.estimated, false);
   });
 });
 

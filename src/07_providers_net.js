@@ -288,6 +288,7 @@ function investingRowsToEvents_(rows, ctx) {
       category: indicator.category,
       source: 'investing',
       estimated: false,
+      exactTime: true,   // サイトが実際の発表時刻を持っている
       period: investingPeriod_(row.name),
       actual: row.actual,
       forecast: row.forecast,

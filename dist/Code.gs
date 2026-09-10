@@ -79,12 +79,17 @@ const CONFIG = {
   },
 
   display: {
+    // true にすると時刻を持たない「終日の予定」になります。
+    // 既定は false（発表時刻つき）。
+    allDay: false,
     impactEmoji: true,      // 🔴🟠🟡⚪ を件名の先頭に付ける
     countryFlag: true,
     showScore: false,       // 件名にスコアを出す
   },
 
-  // 通知（イベント開始の何分前か）。ランクごとに指定します。
+  // 通知。ランクごとに「何分前か」で指定します。
+  //   時刻つき（既定）… 発表時刻から数えた分数（1440 = 前日の同時刻、30 = 30分前）
+  //   display.allDay: true … その日の 0:00 から数えた分数（900 = 前日の朝9時）
   reminders: { S: [1440, 30], A: [30], B: [], C: [] },
 
   // Google カレンダーの色 ID（11=赤 6=オレンジ 5=黄 8=グレー）
@@ -1505,6 +1510,10 @@ function makeEvent_(fields) {
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
     estimated: !!fields.estimated,
+    // その情報源が「実際の発表時刻」を持っているか。
+    // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
+    // 本物の時刻を持つ情報源が現れたらそちらに譲る。
+    exactTime: !!fields.exactTime,
     period: fields.period || null,
     actual: fields.actual || null,
     forecast: fields.forecast || null,
@@ -1575,6 +1584,15 @@ function mergeEvent_(a, b) {
   // 確定日は、どの情報源から来たものでも推定日に勝つ。
   if (merged.estimated && !low.estimated) {
     merged.estimated = false;
+    merged.start = low.start;
+    merged.end = low.end;
+  }
+  // 時刻も同じ考え方で、本物を持っている方に譲る。
+  // 例: FRED は発表「日」しか返さないので時刻はカタログの慣例値になる。
+  // そこに実時刻を持つ情報源が来たら、日付は FRED、時刻はそちらを採る。
+  // （合成は同じ表示日のもの同士でしか起きないので、日付はずれない）
+  if (!merged.exactTime && low.exactTime) {
+    merged.exactTime = true;
     merged.start = low.start;
     merged.end = low.end;
   }
@@ -2107,6 +2125,7 @@ function investingRowsToEvents_(rows, ctx) {
       category: indicator.category,
       source: 'investing',
       estimated: false,
+      exactTime: true,   // サイトが実際の発表時刻を持っている
       period: investingPeriod_(row.name),
       actual: row.actual,
       forecast: row.forecast,
@@ -2640,8 +2659,13 @@ function renderDescription_(event) {
   lines.push('影響度  ' + stars_(event.impact) + '  ' + event.impact + '/100 '
              + '（' + tier + 'ランク・' + TIER_LABEL[tier] + '）');
   lines.push('分類    ' + (CATEGORY_LABEL[event.category] || event.category));
-  if (event.allDay) {
-    lines.push('日時    ' + local.date + '(' + local.weekday + ') 終日');
+  if (event.allDay || CONFIG.display.allDay) {
+    // 米東部時間の午後に出るもの（FOMC など）は日本時間だと翌日になる。
+    // どちらの日付を指しているのか分かるよう、ずれるときだけ併記する。
+    const eastern = formatClock_(event.start, ET);
+    const shifted = eastern.date !== local.date && !event.allDay
+      ? '   （米国時間 ' + eastern.date + ' の発表）' : '';
+    lines.push('日付    ' + local.date + '(' + local.weekday + ')' + shifted);
   } else {
     const eastern = formatClock_(event.start, ET);
     lines.push('日時    ' + local.date + '(' + local.weekday + ') ' + local.time
@@ -2668,15 +2692,17 @@ function renderDescription_(event) {
                + '公式発表で前後する可能性があります。');
   }
   if (event.url) lines.push('🔗 ' + event.url);
-  lines.push('情報源: ' + event.source + ' / 自動同期: ' + MARKER);
+  const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
+    ? '' : '（時刻は慣例値）';
+  lines.push('情報源: ' + event.source + timeNote + ' / 自動同期: ' + MARKER);
   return lines.join('\n');
 }
 
 /** 実行ログやダイジェスト用の1行表示。 */
 function renderLine_(event) {
   const local = formatClock_(event.start, CONFIG.timezone);
-  const when = local.short + '(' + local.weekday + ') '
-             + (event.allDay ? '終日  ' : local.time);
+  const when = local.short + '(' + local.weekday + ')'
+             + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
   const flag = FLAGS[event.country] || '  ';
   const mark = event.estimated ? '~' : ' ';
   let figures = '';
@@ -2761,7 +2787,6 @@ function toCalendarResource_(event) {
       private: {
         ecal: MANAGED_VALUE,
         uid: eventUid_(event, timezone),
-        hash: eventContentHash_(event),
         indicator: event.indicatorId,
         impact: String(event.impact),
         source: event.source,
@@ -2769,7 +2794,7 @@ function toCalendarResource_(event) {
     },
   };
 
-  if (event.allDay) {
+  if (event.allDay || CONFIG.display.allDay) {
     const day = localDate_(event.start, timezone);
     resource.start = { date: dateKey_(day) };
     resource.end = { date: dateKey_(addDays_(day, 1)) };
@@ -2783,7 +2808,25 @@ function toCalendarResource_(event) {
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };
   }
+
+  resource.extendedProperties.private.hash = resourceContentHash_(resource);
   return resource;
+}
+
+/**
+ * 実際にカレンダーへ書き込む内容そのもののハッシュ。
+ *
+ * イベントの生データではなく組み立て後の姿を見るのがだいじで、そうしないと
+ * 表示設定（終日にする・絵文字をやめる等）を変えても「変化なし」と判定され、
+ * 既存の予定が古い見た目のまま残り続ける。
+ */
+function resourceContentHash_(resource) {
+  const payload = JSON.stringify([
+    resource.summary, resource.description, resource.start, resource.end,
+    resource.colorId || null, resource.reminders, resource.transparency,
+    resource.source || null,
+  ]);
+  return sha1Hex_(payload).slice(0, 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -2920,7 +2963,7 @@ function buildPlan_(calendarId, events, existing, ctx) {
     const current = byId[resource.id];
     if (!current) {
       plan.created.push({ event: event, resource: resource });
-    } else if (storedHash_(current) === eventContentHash_(event)) {
+    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {
       plan.unchanged.push(event);
     } else {
       plan.updated.push({ event: event, resource: resource });

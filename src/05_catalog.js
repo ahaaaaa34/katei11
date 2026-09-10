@@ -111,6 +111,10 @@ function makeEvent_(fields) {
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
     estimated: !!fields.estimated,
+    // その情報源が「実際の発表時刻」を持っているか。
+    // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
+    // 本物の時刻を持つ情報源が現れたらそちらに譲る。
+    exactTime: !!fields.exactTime,
     period: fields.period || null,
     actual: fields.actual || null,
     forecast: fields.forecast || null,
@@ -181,6 +185,15 @@ function mergeEvent_(a, b) {
   // 確定日は、どの情報源から来たものでも推定日に勝つ。
   if (merged.estimated && !low.estimated) {
     merged.estimated = false;
+    merged.start = low.start;
+    merged.end = low.end;
+  }
+  // 時刻も同じ考え方で、本物を持っている方に譲る。
+  // 例: FRED は発表「日」しか返さないので時刻はカタログの慣例値になる。
+  // そこに実時刻を持つ情報源が来たら、日付は FRED、時刻はそちらを採る。
+  // （合成は同じ表示日のもの同士でしか起きないので、日付はずれない）
+  if (!merged.exactTime && low.exactTime) {
+    merged.exactTime = true;
     merged.start = low.start;
     merged.end = low.end;
   }

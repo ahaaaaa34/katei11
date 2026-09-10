@@ -49,8 +49,13 @@ function renderDescription_(event) {
   lines.push('影響度  ' + stars_(event.impact) + '  ' + event.impact + '/100 '
              + '（' + tier + 'ランク・' + TIER_LABEL[tier] + '）');
   lines.push('分類    ' + (CATEGORY_LABEL[event.category] || event.category));
-  if (event.allDay) {
-    lines.push('日時    ' + local.date + '(' + local.weekday + ') 終日');
+  if (event.allDay || CONFIG.display.allDay) {
+    // 米東部時間の午後に出るもの（FOMC など）は日本時間だと翌日になる。
+    // どちらの日付を指しているのか分かるよう、ずれるときだけ併記する。
+    const eastern = formatClock_(event.start, ET);
+    const shifted = eastern.date !== local.date && !event.allDay
+      ? '   （米国時間 ' + eastern.date + ' の発表）' : '';
+    lines.push('日付    ' + local.date + '(' + local.weekday + ')' + shifted);
   } else {
     const eastern = formatClock_(event.start, ET);
     lines.push('日時    ' + local.date + '(' + local.weekday + ') ' + local.time
@@ -77,15 +82,17 @@ function renderDescription_(event) {
                + '公式発表で前後する可能性があります。');
   }
   if (event.url) lines.push('🔗 ' + event.url);
-  lines.push('情報源: ' + event.source + ' / 自動同期: ' + MARKER);
+  const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
+    ? '' : '（時刻は慣例値）';
+  lines.push('情報源: ' + event.source + timeNote + ' / 自動同期: ' + MARKER);
   return lines.join('\n');
 }
 
 /** 実行ログやダイジェスト用の1行表示。 */
 function renderLine_(event) {
   const local = formatClock_(event.start, CONFIG.timezone);
-  const when = local.short + '(' + local.weekday + ') '
-             + (event.allDay ? '終日  ' : local.time);
+  const when = local.short + '(' + local.weekday + ')'
+             + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
   const flag = FLAGS[event.country] || '  ';
   const mark = event.estimated ? '~' : ' ';
   let figures = '';
