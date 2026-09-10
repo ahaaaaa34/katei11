@@ -261,7 +261,7 @@ function ruleDates_(rule, start, end) {
   }
 
   if (kind === 'weekly') {
-    const weekday = WEEKDAY_NUM[rule.weekday || 'thu'];
+    const weekday = weekdayNumber_(rule.weekday || 'thu');
     let cursor = addDays_(start, (weekday - weekdayOf_(start) + 7) % 7);
     while (cursor.getTime() <= end.getTime()) {
       let candidate = cursor;
@@ -284,7 +284,7 @@ function ruleDates_(rule, start, end) {
       const index = n > 0 ? n - 1 : days.length + n;
       if (index >= 0 && index < days.length) push(days[index]);
     } else if (kind === 'nth_weekday') {
-      const date = nthWeekday_(year, month, WEEKDAY_NUM[rule.weekday || 'fri'],
+      const date = nthWeekday_(year, month, weekdayNumber_(rule.weekday || 'fri'),
                                rule.n === undefined ? 1 : rule.n);
       if (date.getUTCMonth() + 1 === month) push(date);
     } else if (kind === 'day_of_month') {
@@ -312,6 +312,20 @@ function businessDayNearDay_(year, month, day) {
     backward = addDays_(backward, -1);
   }
   return isBusinessDay_(backward) ? backward : forward;
+}
+
+/**
+ * 曜日名を番号に直す。知らない名前は黙って0件にせず落とす。
+ * 綴りを間違えたときに、その指標だけが何も言わずカレンダーから消えるのが
+ * 一番たちが悪いので。
+ */
+function weekdayNumber_(name) {
+  const value = WEEKDAY_NUM[String(name).toLowerCase()];
+  if (value === undefined) {
+    throw new Error('曜日の指定が不正です: ' + name
+                    + '（mon/tue/wed/thu/fri/sat/sun のいずれか）');
+  }
+  return value;
 }
 
 function eachMonth_(start, end, callback) {

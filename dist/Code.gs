@@ -957,6 +957,9 @@ function utf8Bytes_(text) {
         i++;
       }
     }
+    // 対になっていないサロゲートは UTF-8 で表せない。標準の変換器と同じく
+    // U+FFFD に置き換える（そのまま符号化すると他の実装と値がずれる）。
+    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
     if (code < 0x80) out.push(code);
     else if (code < 0x800) out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
     else if (code < 0x10000) {
@@ -1303,7 +1306,7 @@ function ruleDates_(rule, start, end) {
   }
 
   if (kind === 'weekly') {
-    const weekday = WEEKDAY_NUM[rule.weekday || 'thu'];
+    const weekday = weekdayNumber_(rule.weekday || 'thu');
     let cursor = addDays_(start, (weekday - weekdayOf_(start) + 7) % 7);
     while (cursor.getTime() <= end.getTime()) {
       let candidate = cursor;
@@ -1326,7 +1329,7 @@ function ruleDates_(rule, start, end) {
       const index = n > 0 ? n - 1 : days.length + n;
       if (index >= 0 && index < days.length) push(days[index]);
     } else if (kind === 'nth_weekday') {
-      const date = nthWeekday_(year, month, WEEKDAY_NUM[rule.weekday || 'fri'],
+      const date = nthWeekday_(year, month, weekdayNumber_(rule.weekday || 'fri'),
                                rule.n === undefined ? 1 : rule.n);
       if (date.getUTCMonth() + 1 === month) push(date);
     } else if (kind === 'day_of_month') {
@@ -1354,6 +1357,20 @@ function businessDayNearDay_(year, month, day) {
     backward = addDays_(backward, -1);
   }
   return isBusinessDay_(backward) ? backward : forward;
+}
+
+/**
+ * 曜日名を番号に直す。知らない名前は黙って0件にせず落とす。
+ * 綴りを間違えたときに、その指標だけが何も言わずカレンダーから消えるのが
+ * 一番たちが悪いので。
+ */
+function weekdayNumber_(name) {
+  const value = WEEKDAY_NUM[String(name).toLowerCase()];
+  if (value === undefined) {
+    throw new Error('曜日の指定が不正です: ' + name
+                    + '（mon/tue/wed/thu/fri/sat/sun のいずれか）');
+  }
+  return value;
 }
 
 function eachMonth_(start, end, callback) {
@@ -2762,7 +2779,7 @@ function toCalendarResource_(event) {
   }
 
   const color = CONFIG.colors[tier];
-  if (color) resource.colorId = String(color);
+  if (color) resource.colorId = String(color).trim();
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };
   }
@@ -2873,7 +2890,24 @@ function listManagedEvents_(calendarId, start, end) {
 // 差分
 // ---------------------------------------------------------------------------
 
-function buildPlan_(calendarId, events, existing) {
+/**
+ * カレンダー上の予定が「表示日ベースで何日のものか」を返す。
+ *
+ * 同期のときに記録した uid（指標id@表示日）が正。無ければ開始時刻から求める。
+ */
+function resourceDisplayDate_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  const uid = props.uid || '';
+  const match = /@(\d{4}-\d{2}-\d{2})$/.exec(uid);
+  if (match) return parseDateKey_(match[1]);
+  if (item.start && item.start.date) return parseDateKey_(item.start.date);
+  if (item.start && item.start.dateTime) {
+    return localDate_(new Date(item.start.dateTime), CONFIG.timezone);
+  }
+  return null;
+}
+
+function buildPlan_(calendarId, events, existing, ctx) {
   const byId = {};
   existing.forEach(function (item) { byId[item.id] = item; });
 
@@ -2895,10 +2929,23 @@ function buildPlan_(calendarId, events, existing) {
 
   // この期間に前回書き込んだのに今回は選ばれなかったもの＝
   // 発表日が動いた、あるいはしきい値を上げた、のどちらか。
+  //
+  // ただし削除してよいのは、同期範囲の中の日付の予定だけ。
+  // 日をまたぐ予定（23:45 開始など）は、範囲の外の日のものでも
+  // 時間帯が重なるせいで一覧に出てくる。それを消すと、範囲から外れた
+  // 過去の記録が「たまたま日付をまたいでいたから」という理由で消える。
   existing.forEach(function (item) {
-    if (!seen[item.id]) plan.deleted.push(item);
+    if (seen[item.id]) return;
+    if (ctx && !inPruneRange_(item, ctx)) return;
+    plan.deleted.push(item);
   });
   return plan;
+}
+
+function inPruneRange_(item, ctx) {
+  const day = resourceDisplayDate_(item);
+  if (!day) return true;   // 判定できないものは従来どおり整理対象にする
+  return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
 }
 
 function storedHash_(item) {
@@ -3264,6 +3311,20 @@ function validateConfig_() {
     });
   });
 
+  TIERS.forEach(function (tier) {
+    const color = (CONFIG.colors || {})[tier];
+    if (color === undefined || color === null || color === '') return;
+    const number = Number(color);
+    if (!Number.isInteger(number) || number < 1 || number > 11
+        || String(number) !== String(color).trim()) {
+      // Google が受け付けるのは 1〜11 だけ。ここで弾かないと、同期のたびに
+      // 予定の作成が失敗して原因が分からなくなる。
+      problems.push('colors.' + tier + ' は "1"〜"11" にしてください: ' + color);
+    }
+  });
+
+  problems.push.apply(problems, catalogProblems_());
+
   const triggers = CONFIG.triggers;
   if (!triggers || typeof triggers !== 'object') {
     problems.push('triggers の設定がありません（morningHour / eveningHour）');
@@ -3280,6 +3341,55 @@ function validateConfig_() {
     throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
                     + problems.join('\n  - '));
   }
+}
+
+/**
+ * 指標カタログの書式を点検する。利用者が 01_indicators.js を触ったときに、
+ * その指標が黙ってカレンダーから消えるのを防ぐ。
+ */
+function catalogProblems_() {
+  const validTypes = ['nth_business_day', 'nth_weekday', 'day_of_month', 'weekly', 'none'];
+  const problems = [];
+  const seen = {};
+
+  INDICATORS.forEach(function (indicator) {
+    const id = indicator.id || '(id なし)';
+    if (!indicator.id) problems.push('id の無い指標があります: ' + indicator.name);
+    if (seen[id]) problems.push('指標 id が重複しています: ' + id);
+    seen[id] = true;
+
+    if (typeof indicator.impact !== 'number' || indicator.impact < 0 || indicator.impact > 100) {
+      problems.push(id + ': impact は 0〜100 の数値にしてください');
+    }
+
+    const schedule = indicator.schedule || {};
+    const type = schedule.type || 'none';
+    if (validTypes.indexOf(type) === -1) {
+      problems.push(id + ': schedule.type が不正です（' + type + '）');
+    }
+    if (schedule.weekday !== undefined
+        && WEEKDAY_NUM[String(schedule.weekday).toLowerCase()] === undefined) {
+      problems.push(id + ': schedule.weekday が不正です（' + schedule.weekday + '）');
+    }
+    // time は schedule.type が none の指標でも使う（FOMC や外部取得ぶんの
+    // 時刻になる）ので、書いてあるなら必ず検査する。
+    if (indicator.time !== undefined && indicator.time !== null) {
+      const parts = /^(\d{1,2}):(\d{2})$/.exec(String(indicator.time));
+      if (!parts || Number(parts[1]) > 23 || Number(parts[2]) > 59) {
+        problems.push(id + ': time が不正です（' + indicator.time + '）');
+      }
+    } else if (type !== 'none' && !indicator.all_day) {
+      problems.push(id + ': 発表日を計算する指標には time が必要です');
+    }
+    if (indicator.tz) {
+      try {
+        tzParts_(new Date(), indicator.tz);
+      } catch (err) {
+        problems.push(id + ': tz が不正です（' + indicator.tz + '）');
+      }
+    }
+  });
+  return problems;
 }
 
 /**
@@ -3347,7 +3457,7 @@ function syncCalendar() {
     const plan = withCalendarRecovery_(function () {
       const calendarId = resolveCalendarId_(true);
       const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
-      return applyPlan_(buildPlan_(calendarId, events, existing));
+      return applyPlan_(buildPlan_(calendarId, events, existing, ctx));
     });
 
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
@@ -3631,6 +3741,11 @@ function runTests() {
     eq(INDICATORS.length > 30, true);
     eq(indicator_('us_cpi').impact >= 90, true);
     eq(matchEventName_('Core CPI (MoM) (Aug)').id, 'us_cpi');
+  });
+
+  check('指標カタログの書式に誤りがない', function () {
+    const problems = catalogProblems_();
+    if (problems.length) throw new Error(problems.join(' / '));
   });
 
   check('通信なしで1か月ぶんの予定が組める', function () {

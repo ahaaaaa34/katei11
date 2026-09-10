@@ -72,6 +72,20 @@ function validateConfig_() {
     });
   });
 
+  TIERS.forEach(function (tier) {
+    const color = (CONFIG.colors || {})[tier];
+    if (color === undefined || color === null || color === '') return;
+    const number = Number(color);
+    if (!Number.isInteger(number) || number < 1 || number > 11
+        || String(number) !== String(color).trim()) {
+      // Google が受け付けるのは 1〜11 だけ。ここで弾かないと、同期のたびに
+      // 予定の作成が失敗して原因が分からなくなる。
+      problems.push('colors.' + tier + ' は "1"〜"11" にしてください: ' + color);
+    }
+  });
+
+  problems.push.apply(problems, catalogProblems_());
+
   const triggers = CONFIG.triggers;
   if (!triggers || typeof triggers !== 'object') {
     problems.push('triggers の設定がありません（morningHour / eveningHour）');
@@ -88,6 +102,55 @@ function validateConfig_() {
     throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
                     + problems.join('\n  - '));
   }
+}
+
+/**
+ * 指標カタログの書式を点検する。利用者が 01_indicators.js を触ったときに、
+ * その指標が黙ってカレンダーから消えるのを防ぐ。
+ */
+function catalogProblems_() {
+  const validTypes = ['nth_business_day', 'nth_weekday', 'day_of_month', 'weekly', 'none'];
+  const problems = [];
+  const seen = {};
+
+  INDICATORS.forEach(function (indicator) {
+    const id = indicator.id || '(id なし)';
+    if (!indicator.id) problems.push('id の無い指標があります: ' + indicator.name);
+    if (seen[id]) problems.push('指標 id が重複しています: ' + id);
+    seen[id] = true;
+
+    if (typeof indicator.impact !== 'number' || indicator.impact < 0 || indicator.impact > 100) {
+      problems.push(id + ': impact は 0〜100 の数値にしてください');
+    }
+
+    const schedule = indicator.schedule || {};
+    const type = schedule.type || 'none';
+    if (validTypes.indexOf(type) === -1) {
+      problems.push(id + ': schedule.type が不正です（' + type + '）');
+    }
+    if (schedule.weekday !== undefined
+        && WEEKDAY_NUM[String(schedule.weekday).toLowerCase()] === undefined) {
+      problems.push(id + ': schedule.weekday が不正です（' + schedule.weekday + '）');
+    }
+    // time は schedule.type が none の指標でも使う（FOMC や外部取得ぶんの
+    // 時刻になる）ので、書いてあるなら必ず検査する。
+    if (indicator.time !== undefined && indicator.time !== null) {
+      const parts = /^(\d{1,2}):(\d{2})$/.exec(String(indicator.time));
+      if (!parts || Number(parts[1]) > 23 || Number(parts[2]) > 59) {
+        problems.push(id + ': time が不正です（' + indicator.time + '）');
+      }
+    } else if (type !== 'none' && !indicator.all_day) {
+      problems.push(id + ': 発表日を計算する指標には time が必要です');
+    }
+    if (indicator.tz) {
+      try {
+        tzParts_(new Date(), indicator.tz);
+      } catch (err) {
+        problems.push(id + ': tz が不正です（' + indicator.tz + '）');
+      }
+    }
+  });
+  return problems;
 }
 
 /**
@@ -155,7 +218,7 @@ function syncCalendar() {
     const plan = withCalendarRecovery_(function () {
       const calendarId = resolveCalendarId_(true);
       const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
-      return applyPlan_(buildPlan_(calendarId, events, existing));
+      return applyPlan_(buildPlan_(calendarId, events, existing, ctx));
     });
 
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)

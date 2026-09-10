@@ -5,6 +5,7 @@
 バグを入れ直して落ちなければ、そのテストは何も守っていない。
 """
 
+import atexit
 import re
 import subprocess
 import sys
@@ -60,6 +61,19 @@ MUTATIONS = [
     ("月をまたぐ押し出しを許す", "src/04_schedule.js",
      "      push(businessDayNearDay_(year, month, Math.min(rule.day || 1, 28)));",
      "      push(nextBusinessDay_(ymd_(year, month, Math.min(rule.day || 1, 28))));"),
+    ("日をまたぐ予定も削除対象にする", "src/11_sync.js",
+     "    if (ctx && !inPruneRange_(item, ctx)) return;", ""),
+    ("曜日の綴り誤りを黙って通す", "src/04_schedule.js",
+     "  const value = WEEKDAY_NUM[String(name).toLowerCase()];\n  if (value === undefined) {",
+     "  const value = WEEKDAY_NUM[String(name).toLowerCase()];\n  if (false) {"),
+    ("色 ID の検証をやめる", "src/14_main.js",
+     "    if (!Number.isInteger(number) || number < 1 || number > 11\n"
+     "        || String(number) !== String(color).trim()) {",
+     "    if (false) {"),
+    ("カタログの検証をやめる", "src/14_main.js",
+     "  problems.push.apply(problems, catalogProblems_());", ""),
+    ("孤立サロゲートをそのまま符号化する", "src/03_util.js",
+     "    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;", ""),
     ("推定日の間引きをやめる", "src/09_collect.js",
      "      if (Math.abs(daysBetween_(day, known[i])) <= SUPERSEDE_WINDOW_DAYS) return false;",
      ""),
@@ -84,7 +98,19 @@ def run_tests(timeout=120):
     return int(match.group(2)), match.group(0)
 
 
+def restore_all(originals):
+    for path, source in originals.items():
+        open(path, "w", encoding="utf-8").write(source)
+
+
 def main():
+    # 途中で強制終了されても作業ツリーを汚さない。finally だけでは
+    # SIGKILL に対応できないので、git でも復元できることを確かめておく。
+    dirty = subprocess.run(["git", "diff", "--quiet", "--", "src"]).returncode != 0
+    if dirty:
+        print("注意: src に未コミットの変更があります。"
+              "変異が途中で残った場合、git で戻せません。")
+
     baseline, summary = run_tests()
     if baseline is None or baseline > 0:
         print(f"変異前のテストが通っていません: {summary}")
@@ -94,6 +120,8 @@ def main():
     originals = {}
     for _, path, _, _ in MUTATIONS:
         originals.setdefault(path, open(path, encoding="utf-8").read())
+    # 例外でも Ctrl-C でも、確実に書き戻す
+    atexit.register(restore_all, originals)
 
     missed = []
     try:

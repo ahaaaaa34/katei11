@@ -71,7 +71,10 @@ function makeStubs(overrides = {}) {
     LockService: pick('LockService', {
       getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }),
     }),
-    Session: { getEffectiveUser: () => ({ getEmail: () => 'test@example.com' }) },
+    Session: pick('Session', {
+      getEffectiveUser: () => ({ getEmail: () => 'test@example.com' }),
+      getScriptTimeZone: () => 'Asia/Tokyo',
+    }),
     Utilities: {
       // Intl が使える環境ではこちらは呼ばれない。保険経路の形だけ用意する。
       formatDate: () => { throw new Error('Utilities.formatDate は使われていません'); },

@@ -84,6 +84,9 @@ function utf8Bytes_(text) {
         i++;
       }
     }
+    // 対になっていないサロゲートは UTF-8 で表せない。標準の変換器と同じく
+    // U+FFFD に置き換える（そのまま符号化すると他の実装と値がずれる）。
+    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
     if (code < 0x80) out.push(code);
     else if (code < 0x800) out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
     else if (code < 0x10000) {

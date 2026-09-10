@@ -85,7 +85,7 @@ function toCalendarResource_(event) {
   }
 
   const color = CONFIG.colors[tier];
-  if (color) resource.colorId = String(color);
+  if (color) resource.colorId = String(color).trim();
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };
   }
@@ -196,7 +196,24 @@ function listManagedEvents_(calendarId, start, end) {
 // 差分
 // ---------------------------------------------------------------------------
 
-function buildPlan_(calendarId, events, existing) {
+/**
+ * カレンダー上の予定が「表示日ベースで何日のものか」を返す。
+ *
+ * 同期のときに記録した uid（指標id@表示日）が正。無ければ開始時刻から求める。
+ */
+function resourceDisplayDate_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  const uid = props.uid || '';
+  const match = /@(\d{4}-\d{2}-\d{2})$/.exec(uid);
+  if (match) return parseDateKey_(match[1]);
+  if (item.start && item.start.date) return parseDateKey_(item.start.date);
+  if (item.start && item.start.dateTime) {
+    return localDate_(new Date(item.start.dateTime), CONFIG.timezone);
+  }
+  return null;
+}
+
+function buildPlan_(calendarId, events, existing, ctx) {
   const byId = {};
   existing.forEach(function (item) { byId[item.id] = item; });
 
@@ -218,10 +235,23 @@ function buildPlan_(calendarId, events, existing) {
 
   // この期間に前回書き込んだのに今回は選ばれなかったもの＝
   // 発表日が動いた、あるいはしきい値を上げた、のどちらか。
+  //
+  // ただし削除してよいのは、同期範囲の中の日付の予定だけ。
+  // 日をまたぐ予定（23:45 開始など）は、範囲の外の日のものでも
+  // 時間帯が重なるせいで一覧に出てくる。それを消すと、範囲から外れた
+  // 過去の記録が「たまたま日付をまたいでいたから」という理由で消える。
   existing.forEach(function (item) {
-    if (!seen[item.id]) plan.deleted.push(item);
+    if (seen[item.id]) return;
+    if (ctx && !inPruneRange_(item, ctx)) return;
+    plan.deleted.push(item);
   });
   return plan;
+}
+
+function inPruneRange_(item, ctx) {
+  const day = resourceDisplayDate_(item);
+  if (!day) return true;   // 判定できないものは従来どおり整理対象にする
+  return day.getTime() >= ctx.start.getTime() && day.getTime() <= ctx.end.getTime();
 }
 
 function storedHash_(item) {

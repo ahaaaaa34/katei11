@@ -70,6 +70,11 @@ function runTests() {
     eq(matchEventName_('Core CPI (MoM) (Aug)').id, 'us_cpi');
   });
 
+  check('指標カタログの書式に誤りがない', function () {
+    const problems = catalogProblems_();
+    if (problems.length) throw new Error(problems.join(' / '));
+  });
+
   check('通信なしで1か月ぶんの予定が組める', function () {
     const saved = JSON.parse(JSON.stringify(CONFIG.providers));
     CONFIG.providers.fred = false;

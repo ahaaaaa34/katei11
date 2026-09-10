@@ -23,6 +23,9 @@ jobs:
       - name: 生成物が最新であること
         run: git diff --exit-code dist/Code.gs
 
+      - name: 呼ばれていない関数が無いこと
+        run: npm run coverage
+
   # テストが本当にバグを捕まえるかを検査する。修正を1つずつ巻き戻して、
   # 対応するテストが落ちなければ失敗させる。
   mutation:
