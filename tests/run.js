@@ -1543,4 +1543,50 @@ suite('回帰: 設定ミスで実行が終わらなくなる', () => {
   });
 });
 
+suite('回帰: 規則の展開が月をまたぐ', () => {
+  test('月末近くの指標が、ある月は0回・翌月は2回にならない', () => {
+    // 2027-02-27 は土曜。素直に翌営業日へ送ると 3/1 になり、
+    // 2月が消えて3月が2回になる。
+    const dates = G.ruleDates_({ type: 'day_of_month', day: 27 },
+                               Y(2027, 1, 1), Y(2027, 12, 31)).map(K);
+    eq(dates.length, 12, '毎月1回であること');
+    eq(dates[1], '2027-02-26', '月をまたぐくらいなら手前の営業日へ寄せる');
+  });
+
+  test('全指標が、対象の月にきっかり1回だけ発生する（2024-2035年）', () => {
+    const kinds = ['day_of_month', 'nth_business_day', 'nth_weekday'];
+    const problems = [];
+    G.INDICATORS.forEach((indicator) => {
+      const schedule = indicator.schedule || {};
+      if (kinds.indexOf(schedule.type) === -1) return;
+      const months = schedule.months || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+      for (let year = 2024; year <= 2035; year++) {
+        const counts = {};
+        G.ruleDates_(schedule, Y(year, 1, 1), Y(year, 12, 31)).forEach((date) => {
+          const month = date.getUTCMonth() + 1;
+          counts[month] = (counts[month] || 0) + 1;
+        });
+        months.forEach((month) => {
+          if ((counts[month] || 0) !== 1) {
+            problems.push(indicator.id + ' ' + year + '/' + month
+                          + ': ' + (counts[month] || 0) + '回');
+          }
+        });
+        Object.keys(counts).forEach((month) => {
+          if (months.indexOf(Number(month)) === -1) {
+            problems.push(indicator.id + ' ' + year + '/' + month + ' は対象外の月');
+          }
+        });
+      }
+    });
+    eq(problems.slice(0, 5), []);
+  });
+
+  test('月初の指標は翌営業日へ送ってよい（手前に寄せない）', () => {
+    // 2026-11-01 は日曜。第1営業日は 11/2 で、10月へ戻してはいけない。
+    eq(G.ruleDates_({ type: 'day_of_month', day: 1 },
+                    Y(2026, 11, 1), Y(2026, 11, 30)).map(K), ['2026-11-02']);
+  });
+});
+
 process.exitCode = require('./assert').report();

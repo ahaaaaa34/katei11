@@ -230,7 +230,7 @@ Investing.com の公開エンドポイントを読みます。**公式 API で�
 ## 開発
 
 ```bash
-npm test          # 178 テスト・ネットワーク不要
+npm test          # 181 テスト・ネットワーク不要
 npm run bundle    # src/*.js → dist/Code.gs
 npm run mutate    # テストが本当にバグを捕まえるかを検査（下記）
 npm run check     # test + bundle

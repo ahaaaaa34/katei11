@@ -50,6 +50,11 @@ const CONFIG = {
     investing: false,
   },
 
+  // investing を有効にしたとき、時刻がずれる場合だけ触ってください。
+  // timezoneId はサイト内部の ID、assumeTz はそれが指すタイムゾーンです。
+  investingTimezoneId: 55,
+  investingAssumeTz: 'UTC',
+
   // 決算を拾う銘柄と、その影響度
   earningsTickers: {
     NVDA: 95, AAPL: 88, MSFT: 88, GOOGL: 85, AMZN: 85, META: 84,

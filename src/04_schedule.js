@@ -288,12 +288,30 @@ function ruleDates_(rule, start, end) {
                                rule.n === undefined ? 1 : rule.n);
       if (date.getUTCMonth() + 1 === month) push(date);
     } else if (kind === 'day_of_month') {
-      push(nextBusinessDay_(ymd_(year, month, Math.min(rule.day || 1, 28))));
+      push(businessDayNearDay_(year, month, Math.min(rule.day || 1, 28)));
     } else {
       throw new Error('未知のスケジュール種別: ' + kind);
     }
   });
   return sortDates_(out);
+}
+
+/**
+ * 「その月の n 日ごろ」を、その月の中の営業日に落とす。
+ *
+ * 素直に翌営業日へ送ると、月末近くが週末に当たったときに翌月へはみ出し、
+ * その月は0回・翌月は2回という並びになってしまう（PCE の 27 日など）。
+ * 月をまたぐくらいなら手前の営業日に寄せる。
+ */
+function businessDayNearDay_(year, month, day) {
+  const forward = nextBusinessDay_(ymd_(year, month, day));
+  if (forward.getUTCMonth() + 1 === month) return forward;
+
+  let backward = ymd_(year, month, day);
+  while (!isBusinessDay_(backward) && backward.getUTCDate() > 1) {
+    backward = addDays_(backward, -1);
+  }
+  return isBusinessDay_(backward) ? backward : forward;
 }
 
 function eachMonth_(start, end, callback) {
