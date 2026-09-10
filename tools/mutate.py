@@ -57,7 +57,7 @@ MUTATIONS = [
     ("週次まとめのしきい値を無視する", "src/12_digest.js",
      "      if (event.impact < threshold) return false;", ""),
     ("内容ハッシュによる差分判定をやめる", "src/11_sync.js",
-     "    } else if (storedHash_(current) === eventContentHash_(event)) {",
+     "    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {",
      "    } else if (false) {"),
     ("月をまたぐ押し出しを許す", "src/04_schedule.js",
      "      push(businessDayNearDay_(year, month, Math.min(rule.day || 1, 28)));",
