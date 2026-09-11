@@ -85,9 +85,13 @@ function renderDescription_(event) {
                + '公式発表で前後する可能性があります。');
   }
   if (event.url) lines.push('🔗 ' + event.url);
+  // どのモジュールが勝ったかは書かない。情報源が一時的に落ちて別の経路から
+  // 同じ予定が組み立てられただけで説明文が変わり、更新が走ってしまうため。
+  // 利用者にとって意味があるのは「日付の根拠」と「時刻が実測かどうか」で、
+  // どちらも上に書いてある。
   const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
-    ? '' : '（時刻は慣例値）';
-  lines.push('情報源: ' + event.source + timeNote + ' / 自動同期: ' + MARKER);
+    ? '' : '（発表時刻は慣例値）';
+  lines.push('自動同期: ' + MARKER + timeNote);
   return lines.join('\n');
 }
 

@@ -1932,7 +1932,11 @@ function providerFred_(ctx) {
   // 米東部の発表日と表示タイムゾーンの日付は1日ずれることがあるので、
   // 前後1日ぶん広く取ってから表示日で絞る。
   const rows = fredReleaseDates_(apiKey, addDays_(ctx.start, -1), addDays_(ctx.end, 1));
-  if (rows === null) return [];
+  if (rows === null) {
+    // つながらなかっただけ。既に書き込んである公式日程を消させない。
+    markSourceDown_('fred', 'FRED に接続できませんでした');
+    return [];
+  }
 
   const events = [];
   // ひとつの指標に複数の release 名が当たったら、正規表現が緩すぎる合図。
@@ -2110,7 +2114,12 @@ function providerEarnings_(ctx) {
       return NASDAQ_EARNINGS + dateKey_(day);
     }));
     responses.forEach(function (payload, index) {
-      if (payload === null) { failures++; return; }
+      if (payload === null) {
+        failures++;
+        // 取れなかった日の決算は「無い」のではなく「分からない」。
+        markSourceDown_('earnings', '決算カレンダーの一部を取得できませんでした');
+        return;
+      }
       const rows = (payload.data && payload.data.rows) || [];
       rows.forEach(function (row) {
         const event = earningsEvent_(chunk[index], row, tickers);
@@ -2213,13 +2222,17 @@ function providerInvesting_(ctx) {
       Accept: 'application/json, text/javascript, */*; q=0.01',
     },
   });
-  if (text === null) return [];
+  if (text === null) {
+    markSourceDown_('investing', 'Investing.com に接続できませんでした');
+    return [];
+  }
 
   let fragment;
   try {
     fragment = JSON.parse(text).data || '';
   } catch (err) {
     log_('Investing.com の応答を解釈できませんでした');
+    markSourceDown_('investing', '応答を解釈できませんでした');
     return [];
   }
   return investingRowsToEvents_(parseInvestingRows_(fragment), ctx);
@@ -2484,6 +2497,7 @@ function fetchAutoFomcMeetings_(curated) {
   const html = fetchText_(FOMC_CALENDAR_URL);
   if (html === null) {
     log_('FOMC 公式ページを取得できませんでした。手入力の日程だけで動きます。');
+    markSourceDown_('fomc', 'Fed の公式ページに接続できませんでした');
     return cached ? cached.years : {};
   }
 
@@ -2492,6 +2506,7 @@ function fetchAutoFomcMeetings_(curated) {
     years = parseFomcCalendar_(html);
   } catch (err) {
     log_('FOMC 公式ページを解釈できませんでした: ' + err);
+    markSourceDown_('fomc', '公式ページを解釈できませんでした');
     return cached ? cached.years : {};
   }
 
@@ -2740,11 +2755,40 @@ function clampDays_(value, fallback, label) {
   return Math.floor(value);
 }
 
+// ---------------------------------------------------------------------------
+// 情報源の生死
+//
+// 「今回は出てこなかった」には2つの意味がある。本当に無くなった（発表日が
+// 動いた・しきい値を上げた）のと、その情報源に今回つながらなかっただけ、の
+// 2つ。後者を消してしまうと、通信が不調な日だけカレンダーから決算や CPI が
+// 消える。区別できるように、落ちた情報源をここに控えておく。
+// ---------------------------------------------------------------------------
+
+let SOURCE_DOWN_ = {};
+
+function resetSourceHealth_() { SOURCE_DOWN_ = {}; }
+
+function markSourceDown_(name, why) {
+  if (!Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name)) {
+    log_('情報源 ' + name + ' は今回使えませんでした（既存の予定は残します）'
+         + (why ? ': ' + why : ''));
+  }
+  SOURCE_DOWN_[name] = why || '取得できませんでした';
+}
+
+function sourceIsDown_(name) {
+  return Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name || '');
+}
+
+/** 今回落ちていた情報源の名前（実行結果の報告に使う）。 */
+function downSources_() { return Object.keys(SOURCE_DOWN_); }
+
 /**
  * 有効な情報源すべてから集めて、重複を解消し、条件で絞る。
  * ひとつの情報源が落ちても同期全体は止めない。
  */
 function collectEvents_(ctx) {
+  resetSourceHealth_();
   const providers = [];
   if (CONFIG.providers.rules) providers.push({ name: 'rules', run: providerRules_ });
   if (CONFIG.providers.fomc) providers.push({ name: 'fomc', run: providerFomc_ });
@@ -2760,6 +2804,7 @@ function collectEvents_(ctx) {
       found = provider.run(ctx) || [];
     } catch (err) {
       log_('情報源 ' + provider.name + ' でエラー（スキップします）: ' + err);
+      markSourceDown_(provider.name, String(err));
       return;
     }
     log_(provider.name + ': ' + found.length + ' 件');
@@ -2775,14 +2820,57 @@ function collectEvents_(ctx) {
   });
 }
 
-/** 同じ発表を同じ日に報告しているものをひとつにまとめる。 */
+/**
+ * 同じ発表を報告しているものをひとつにまとめる。
+ *
+ * まとめる基準は2段構え。
+ *
+ *  1. **指標の地元の日付**（米 CPI なら米東部の 1/11）。
+ *     情報源によって発表時刻の申告が少し違う（FRED＋カタログは 8:30 ET、
+ *     集計サイトは 7:45 ET など）と、表示タイムゾーンによっては真夜中を
+ *     またいで「別の日の別の発表」に見えてしまう。実際に起きた例：
+ *     シドニー表示だと 1/11 12:45Z が 1/11、1/11 13:30Z が 1/12 になり、
+ *     同じ CPI がカレンダーに2つ並んだ。地元の日付なら、どちらも 1/11。
+ *
+ *  2. **表示日**。予定 ID は表示日から決まるので、ここが重なったままだと
+ *     同じ ID の予定を2つ作ろうとして、片方が黙って消える。
+ */
 function mergeEvents_(events, timezone) {
-  const byUid = {};
-  events.forEach(function (event) {
-    const uid = eventUid_(event, timezone);
-    byUid[uid] = byUid[uid] ? mergeEvent_(byUid[uid], event) : event;
+  const byRelease = groupMerge_(events, function (event) {
+    return releaseKey_(event, timezone);
   });
-  return Object.keys(byUid).map(function (uid) { return byUid[uid]; });
+  return groupMerge_(byRelease, function (event) {
+    return eventUid_(event, timezone);
+  });
+}
+
+/** 同じ鍵になったものを mergeEvent_ でまとめる（最初に現れた順は保つ）。 */
+function groupMerge_(events, keyOf) {
+  const byKey = {};
+  const order = [];
+  events.forEach(function (event) {
+    const key = keyOf(event);
+    if (Object.prototype.hasOwnProperty.call(byKey, key)) {
+      byKey[key] = mergeEvent_(byKey[key], event);
+      return;
+    }
+    byKey[key] = event;
+    order.push(key);
+  });
+  return order.map(function (key) { return byKey[key]; });
+}
+
+/**
+ * 「どの発表か」を表す鍵。指標の地元のタイムゾーンで日付を取る。
+ *
+ * 終日の予定（休場日など）は、表示タイムゾーンのその日そのものが中身なので
+ * 地元の日付に直すとかえってずれる。表示日で見る。
+ */
+function releaseKey_(event, timezone) {
+  if (event.allDay) return eventUid_(event, timezone);
+  const indicator = indicator_(event.indicatorId);
+  const tz = indicator ? indicatorTimezone_(indicator) : ET;
+  return event.indicatorId + '@' + dateKey_(localDate_(event.start, tz));
 }
 
 /**
@@ -2922,9 +3010,13 @@ function renderDescription_(event) {
                + '公式発表で前後する可能性があります。');
   }
   if (event.url) lines.push('🔗 ' + event.url);
+  // どのモジュールが勝ったかは書かない。情報源が一時的に落ちて別の経路から
+  // 同じ予定が組み立てられただけで説明文が変わり、更新が走ってしまうため。
+  // 利用者にとって意味があるのは「日付の根拠」と「時刻が実測かどうか」で、
+  // どちらも上に書いてある。
   const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
-    ? '' : '（時刻は慣例値）';
-  lines.push('情報源: ' + event.source + timeNote + ' / 自動同期: ' + MARKER);
+    ? '' : '（発表時刻は慣例値）';
+  lines.push('自動同期: ' + MARKER + timeNote);
   return lines.join('\n');
 }
 
@@ -3020,6 +3112,15 @@ function toCalendarResource_(event) {
         indicator: event.indicatorId,
         impact: String(event.impact),
         source: event.source,
+        confidence: event.confidence,
+        // 次回の判断材料として、失いたくない中身を残しておく。
+        // 情報源が一時的に落ちても、実測の時刻や発表された数値が
+        // カレンダーから消えないようにするため。
+        exact: event.exactTime ? '1' : '0',
+        at: event.start.toISOString(),
+        a: event.actual || '',
+        f: event.forecast || '',
+        p: event.previous || '',
       },
     },
   };
@@ -3180,12 +3281,152 @@ function resourceDisplayDate_(item) {
   return null;
 }
 
+/**
+ * すでにカレンダーにある中身を引き継ぐ。
+ *
+ * 情報源が一時的に落ちただけで、実測の発表時刻や、すでに出た結果の数値が
+ * 消えてしまうのはおかしい。同じ発表（同じ予定 ID）について、前回書いた方が
+ * 詳しいなら、その部分を引き継ぐ。
+ * 今回の方が詳しければ今回が勝つので、値の更新は妨げない。
+ */
+function inheritFromExisting_(events, existing) {
+  const byId = {};
+  existing.forEach(function (item) { byId[item.id] = item; });
+
+  return events.map(function (event) {
+    const item = byId[eventCalendarId_(event, CONFIG.timezone)];
+    if (!item) return event;
+    const props = (item.extendedProperties && item.extendedProperties.private) || {};
+
+    const patch = {};
+    if (!event.actual && props.a) patch.actual = props.a;
+    if (!event.forecast && props.f) patch.forecast = props.f;
+    if (!event.previous && props.p) patch.previous = props.p;
+    if (confidenceRank_(props.confidence) > confidenceRank_(event.confidence)) {
+      // 同じ日付なので、根拠だけ引き継いでよい。
+      patch.confidence = props.confidence;
+    }
+    if (!event.exactTime && props.exact === '1' && props.at) {
+      const remembered = new Date(props.at);
+      if (!isNaN(remembered.getTime())) {
+        patch.exactTime = true;
+        patch.start = remembered;
+        patch.end = new Date(remembered.getTime() + (event.end - event.start));
+      }
+    }
+    if (!Object.keys(patch).length) return event;
+
+    const merged = {};
+    Object.keys(event).forEach(function (key) { merged[key] = event[key]; });
+    Object.keys(patch).forEach(function (key) { merged[key] = patch[key]; });
+    return merged;
+  });
+}
+
+/**
+ * すでにカレンダーにある、より確かな予定を「記憶」として使う。
+ *
+ * FRED が一時的に落ちただけで、公式の発表日で置いた予定が概算の日付に
+ * 戻ってしまうと、利用者のカレンダー上で予定が行ったり来たりする。
+ * 回線の不調で日付が動くようでは、そこに書いてある日付を信じられない。
+ *
+ * そこで、同じ指標の近い日付に、より確かな根拠の予定がすでにあるなら、
+ * 今回の弱い予定は捨てて、あるものをそのまま残す。
+ * 公式の日付が本当に変わったときは、新しい方も official なので置き換わる。
+ */
+function keepStrongerExisting_(events, existing) {
+  const anchors = {};
+  existing.forEach(function (item) {
+    const props = (item.extendedProperties && item.extendedProperties.private) || {};
+    if (!props.indicator || !props.confidence) return;
+    const day = resourceDisplayDate_(item);
+    if (!day) return;
+    (anchors[props.indicator] = anchors[props.indicator] || []).push({
+      id: item.id, day: day, rank: confidenceRank_(props.confidence),
+    });
+  });
+
+  const keptIds = {};
+  const replaced = [];
+  const kept = events.filter(function (event) {
+    const nearby = anchors[event.indicatorId];
+    if (!nearby) return true;
+    const day = localDate_(event.start, CONFIG.timezone);
+    const mine = confidenceRank_(event.confidence);
+    for (let i = 0; i < nearby.length; i++) {
+      if (nearby[i].rank <= mine) continue;
+      if (Math.abs(daysBetween_(day, nearby[i].day)) > SUPERSEDE_WINDOW_DAYS) continue;
+      log_(event.indicatorId + ': より確かな予定が既にあるので、'
+           + dateKey_(day) + ' の弱い予定は作りません');
+      keptIds[nearby[i].id] = true;
+      replaced.push(nearby[i].id);
+      return false;
+    }
+    return true;
+  });
+  return { events: kept, keptIds: keptIds, replaced: replaced };
+}
+
+/**
+ * カレンダーに保存してある予定を、表示用のイベントとして読み戻す。
+ *
+ * 週次まとめは「その週に何があるか」の一覧なので、今回計算したものではなく
+ * **実際にカレンダーに入っているもの**から作らないと、情報源が揺れるたびに
+ * まとめだけが書き換わる。差分計算には使わない（復元がわずかに違っても
+ * 毎回更新が走ってしまうため、用途を表示に限る）。
+ */
+function eventFromResource_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  const indicator = indicator_(props.indicator);
+  const allDay = !!(item.start && item.start.date);
+  const start = allDay
+    ? zonedTime_(parseDateKey_(item.start.date), '00:00', CONFIG.timezone)
+    : new Date(item.start.dateTime);
+  if (isNaN(start.getTime())) return null;
+  const end = allDay ? new Date(start.getTime() + 86400000)
+                     : new Date(new Date(item.end.dateTime).getTime());
+
+  return makeEvent_({
+    indicatorId: props.indicator || 'unknown',
+    title: indicator ? indicator.name : String(item.summary || '').replace(/^[^ ]+ /, ''),
+    start: start,
+    end: isNaN(end.getTime()) ? new Date(start.getTime() + 1800000) : end,
+    impact: Number(props.impact) || (indicator ? indicator.impact : 0),
+    country: indicator ? indicator.country : 'US',
+    // 決算はカタログに無いが、カテゴリで絞っている人のために復元しておく。
+    category: indicator ? indicator.category
+      : (String(props.indicator || '').indexOf('earnings_') === 0 ? 'earnings' : 'other'),
+    source: props.source || 'rules',
+    confidence: props.confidence || 'estimated',
+    allDay: allDay,
+    exactTime: props.exact === '1',
+    actual: props.a || null,
+    forecast: props.f || null,
+    previous: props.p || null,
+  });
+}
+
+/** 表示用に、「今回の予定 ＋ 据え置いた既存の予定」をそろえる。 */
+function displayEvents_(events, existing) {
+  const guarded = keepStrongerExisting_(inheritFromExisting_(events, existing), existing);
+  const byId = {};
+  existing.forEach(function (item) { byId[item.id] = item; });
+  const restored = [];
+  guarded.replaced.forEach(function (id) {
+    const event = byId[id] ? eventFromResource_(byId[id]) : null;
+    if (event) restored.push(event);
+  });
+  return guarded.events.concat(restored);
+}
+
 function buildPlan_(calendarId, events, existing, ctx) {
   const byId = {};
   existing.forEach(function (item) { byId[item.id] = item; });
 
   const plan = { calendarId: calendarId, created: [], updated: [], unchanged: [], deleted: [] };
-  const seen = {};
+  const guarded = keepStrongerExisting_(inheritFromExisting_(events, existing), existing);
+  const seen = guarded.keptIds;
+  events = guarded.events;
 
   events.forEach(function (event) {
     const resource = toCalendarResource_(event);
@@ -3210,9 +3451,30 @@ function buildPlan_(calendarId, events, existing, ctx) {
   existing.forEach(function (item) {
     if (seen[item.id]) return;
     if (ctx && !inPruneRange_(item, ctx)) return;
+    if (keepThroughOutage_(item)) return;
     plan.deleted.push(item);
   });
   return plan;
+}
+
+/**
+ * その予定を、情報源が落ちているという理由だけで消さずに残すか。
+ *
+ * 「今回は出てこなかった」には2つの意味がある。本当に無くなった（発表日が
+ * 動いた・しきい値を上げた）のと、その情報源に今回つながらなかっただけ、の
+ * 2つ。後者で消すと、通信が不調な日だけカレンダーから決算や CPI が消えて
+ * しまう。消してよいのは、その情報源がちゃんと動いた上で「もう無い」と
+ * 言っているときだけ。
+ *
+ * ただし設定で対象外になったもの（しきい値を上げた・exclude に入れた）は、
+ * 情報源の生死に関係なく整理する。人が明示的に外したものだから。
+ */
+function keepThroughOutage_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  if (!sourceIsDown_(props.source)) return false;
+  const restored = eventFromResource_(item);
+  if (!restored) return true;   // 読み戻せないものは、判断がつくまで触らない
+  return applyFilter_([restored]).length > 0;
 }
 
 function inPruneRange_(item, ctx) {
@@ -3663,6 +3925,68 @@ function catalogProblems_() {
         problems.push(id + ': tz が不正です（' + indicator.tz + '）');
       }
     }
+
+    if (indicator.duration !== undefined
+        && (typeof indicator.duration !== 'number' || indicator.duration <= 0
+            || indicator.duration > 24 * 60)) {
+      problems.push(id + ': duration は 1〜1440 分にしてください（' + indicator.duration + '）');
+    }
+    if (indicator.period_offset !== undefined
+        && (typeof indicator.period_offset !== 'number'
+            || Math.abs(indicator.period_offset) > 12)) {
+      problems.push(id + ': period_offset が不正です（' + indicator.period_offset + '）');
+    }
+    // 解説の出典は一次情報であってほしい。せめて https だけは確かめる。
+    if (indicator.url && String(indicator.url).indexOf('https://') !== 0) {
+      problems.push(id + ': url は https にしてください（' + indicator.url + '）');
+    }
+    // 名寄せに使う文字列。空や重複があると、別の指標の数値が入りこむ。
+    (indicator.match || []).forEach(function (pattern) {
+      if (typeof pattern !== 'string' || !pattern.trim()) {
+        problems.push(id + ': match に空の項目があります');
+      }
+    });
+    if (indicator.fred_release !== undefined) {
+      try {
+        new RegExp(indicator.fred_release, 'i');
+      } catch (err) {
+        problems.push(id + ': fred_release が正規表現として不正です（'
+                      + indicator.fred_release + '）');
+      }
+    }
+  });
+
+  problems.push.apply(problems, fredReleaseOverlaps_());
+  return problems;
+}
+
+/**
+ * ひとつの FRED release 名が2つ以上の指標に当たっていないか。
+ *
+ * 当たってしまうと、関係ない発表日が「公式の日付」として別の指標に
+ * 入りこむ。実際の release 名は取ってこないと分からないので、ここでは
+ * カタログどうしを突き合わせ、「A の名前が B の正規表現にも当たる」
+ * という書き方の重なりだけを見る。
+ */
+function fredReleaseOverlaps_() {
+  const withRelease = INDICATORS.filter(function (i) { return i.fred_release; });
+  const problems = [];
+  const reported = {};
+  withRelease.forEach(function (a) {
+    withRelease.forEach(function (b) {
+      if (a.id === b.id) return;
+      let re;
+      try { re = new RegExp(b.fred_release, 'i'); } catch (err) { return; }
+      // a の正規表現から「素の名前らしき部分」を作って b に当ててみる。
+      const plain = String(a.fred_release).replace(/[\^$]/g, '');
+      if (!/^[\w .,&'()-]+$/.test(plain)) return;   // 込み入った式は対象外
+      if (!re.test(plain)) return;
+      const pair = [a.id, b.id].sort().join(' と ');
+      if (reported[pair]) return;   // 同じ組を2回言わない
+      reported[pair] = true;
+      problems.push('FRED の対応付けが重なっています: 「' + plain + '」は '
+                    + pair + ' の両方に当たります');
+    });
   });
   return problems;
 }
@@ -3722,24 +4046,33 @@ function syncCalendar() {
 
   const ctx = syncWindow_();
   try {
-    let events = collectEvents_(ctx);
-    if (!events.length) {
+    const collected = collectEvents_(ctx);
+    if (!collected.length) {
       throw new Error('同期対象が 0 件でした。条件か情報源の状態を確認してください。');
     }
-    events = events.concat(weeklyDigestEvents_(events, ctx));
+    // 週次ダイジェストの通知に使うため、実際に入る姿を外へ持ち出す。
+    let shownEvents = collected;
 
     // カレンダーを消されていた場合に一度だけ探し直す。
     const plan = withCalendarRecovery_(function () {
       const calendarId = resolveCalendarId_(true);
       const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
+      // 週次まとめは各予定の一覧を本文に持つので、実際にカレンダーへ入る
+      // 姿から作る。そうしないと、情報源が揺れるたびにまとめだけが変わる。
+      const enriched = inheritFromExisting_(collected, existing);
+      shownEvents = displayEvents_(collected, existing);
+      const events = enriched.concat(weeklyDigestEvents_(shownEvents, ctx));
       return applyPlan_(buildPlan_(calendarId, events, existing, ctx));
     });
 
+    const down = downSources_();
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
-         + ' / ' + planSummary_(plan));
+         + ' / ' + planSummary_(plan)
+         + (down.length ? ' / 今回つながらなかった情報源: ' + down.join(', ')
+                          + '（その予定はそのまま残しました）' : ''));
 
     notifyMaintenance_(maintenanceReport_(ctx));
-    maybeSendWeeklyDigest_(events, ctx);
+    maybeSendWeeklyDigest_(shownEvents, ctx);
     return plan;
   } catch (error) {
     log_('同期に失敗しました: ' + error);
@@ -3927,6 +4260,15 @@ function dataQuality() {
       lines.push('   ' + (indicator ? indicator.name : id)
                  + ' × ' + estimatedBy[id] + '回');
     });
+  }
+
+  const down = downSources_();
+  if (down.length) {
+    lines.push('');
+    lines.push('■ 今つながらない情報源');
+    down.forEach(function (name) { lines.push('   ' + name); });
+    lines.push('   → この点検結果は、その情報源ぶんが抜けた状態のものです。');
+    lines.push('      （同期では、落ちた情報源ぶんの予定はカレンダーに残します）');
   }
 
   lines.push('');

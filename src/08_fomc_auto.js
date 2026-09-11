@@ -166,6 +166,7 @@ function fetchAutoFomcMeetings_(curated) {
   const html = fetchText_(FOMC_CALENDAR_URL);
   if (html === null) {
     log_('FOMC 公式ページを取得できませんでした。手入力の日程だけで動きます。');
+    markSourceDown_('fomc', 'Fed の公式ページに接続できませんでした');
     return cached ? cached.years : {};
   }
 
@@ -174,6 +175,7 @@ function fetchAutoFomcMeetings_(curated) {
     years = parseFomcCalendar_(html);
   } catch (err) {
     log_('FOMC 公式ページを解釈できませんでした: ' + err);
+    markSourceDown_('fomc', '公式ページを解釈できませんでした');
     return cached ? cached.years : {};
   }
 

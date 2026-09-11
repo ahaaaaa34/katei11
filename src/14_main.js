@@ -151,6 +151,68 @@ function catalogProblems_() {
         problems.push(id + ': tz が不正です（' + indicator.tz + '）');
       }
     }
+
+    if (indicator.duration !== undefined
+        && (typeof indicator.duration !== 'number' || indicator.duration <= 0
+            || indicator.duration > 24 * 60)) {
+      problems.push(id + ': duration は 1〜1440 分にしてください（' + indicator.duration + '）');
+    }
+    if (indicator.period_offset !== undefined
+        && (typeof indicator.period_offset !== 'number'
+            || Math.abs(indicator.period_offset) > 12)) {
+      problems.push(id + ': period_offset が不正です（' + indicator.period_offset + '）');
+    }
+    // 解説の出典は一次情報であってほしい。せめて https だけは確かめる。
+    if (indicator.url && String(indicator.url).indexOf('https://') !== 0) {
+      problems.push(id + ': url は https にしてください（' + indicator.url + '）');
+    }
+    // 名寄せに使う文字列。空や重複があると、別の指標の数値が入りこむ。
+    (indicator.match || []).forEach(function (pattern) {
+      if (typeof pattern !== 'string' || !pattern.trim()) {
+        problems.push(id + ': match に空の項目があります');
+      }
+    });
+    if (indicator.fred_release !== undefined) {
+      try {
+        new RegExp(indicator.fred_release, 'i');
+      } catch (err) {
+        problems.push(id + ': fred_release が正規表現として不正です（'
+                      + indicator.fred_release + '）');
+      }
+    }
+  });
+
+  problems.push.apply(problems, fredReleaseOverlaps_());
+  return problems;
+}
+
+/**
+ * ひとつの FRED release 名が2つ以上の指標に当たっていないか。
+ *
+ * 当たってしまうと、関係ない発表日が「公式の日付」として別の指標に
+ * 入りこむ。実際の release 名は取ってこないと分からないので、ここでは
+ * カタログどうしを突き合わせ、「A の名前が B の正規表現にも当たる」
+ * という書き方の重なりだけを見る。
+ */
+function fredReleaseOverlaps_() {
+  const withRelease = INDICATORS.filter(function (i) { return i.fred_release; });
+  const problems = [];
+  const reported = {};
+  withRelease.forEach(function (a) {
+    withRelease.forEach(function (b) {
+      if (a.id === b.id) return;
+      let re;
+      try { re = new RegExp(b.fred_release, 'i'); } catch (err) { return; }
+      // a の正規表現から「素の名前らしき部分」を作って b に当ててみる。
+      const plain = String(a.fred_release).replace(/[\^$]/g, '');
+      if (!/^[\w .,&'()-]+$/.test(plain)) return;   // 込み入った式は対象外
+      if (!re.test(plain)) return;
+      const pair = [a.id, b.id].sort().join(' と ');
+      if (reported[pair]) return;   // 同じ組を2回言わない
+      reported[pair] = true;
+      problems.push('FRED の対応付けが重なっています: 「' + plain + '」は '
+                    + pair + ' の両方に当たります');
+    });
   });
   return problems;
 }
@@ -210,24 +272,33 @@ function syncCalendar() {
 
   const ctx = syncWindow_();
   try {
-    let events = collectEvents_(ctx);
-    if (!events.length) {
+    const collected = collectEvents_(ctx);
+    if (!collected.length) {
       throw new Error('同期対象が 0 件でした。条件か情報源の状態を確認してください。');
     }
-    events = events.concat(weeklyDigestEvents_(events, ctx));
+    // 週次ダイジェストの通知に使うため、実際に入る姿を外へ持ち出す。
+    let shownEvents = collected;
 
     // カレンダーを消されていた場合に一度だけ探し直す。
     const plan = withCalendarRecovery_(function () {
       const calendarId = resolveCalendarId_(true);
       const existing = listManagedEvents_(calendarId, ctx.start, ctx.end);
+      // 週次まとめは各予定の一覧を本文に持つので、実際にカレンダーへ入る
+      // 姿から作る。そうしないと、情報源が揺れるたびにまとめだけが変わる。
+      const enriched = inheritFromExisting_(collected, existing);
+      shownEvents = displayEvents_(collected, existing);
+      const events = enriched.concat(weeklyDigestEvents_(shownEvents, ctx));
       return applyPlan_(buildPlan_(calendarId, events, existing, ctx));
     });
 
+    const down = downSources_();
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
-         + ' / ' + planSummary_(plan));
+         + ' / ' + planSummary_(plan)
+         + (down.length ? ' / 今回つながらなかった情報源: ' + down.join(', ')
+                          + '（その予定はそのまま残しました）' : ''));
 
     notifyMaintenance_(maintenanceReport_(ctx));
-    maybeSendWeeklyDigest_(events, ctx);
+    maybeSendWeeklyDigest_(shownEvents, ctx);
     return plan;
   } catch (error) {
     log_('同期に失敗しました: ' + error);
@@ -415,6 +486,15 @@ function dataQuality() {
       lines.push('   ' + (indicator ? indicator.name : id)
                  + ' × ' + estimatedBy[id] + '回');
     });
+  }
+
+  const down = downSources_();
+  if (down.length) {
+    lines.push('');
+    lines.push('■ 今つながらない情報源');
+    down.forEach(function (name) { lines.push('   ' + name); });
+    lines.push('   → この点検結果は、その情報源ぶんが抜けた状態のものです。');
+    lines.push('      （同期では、落ちた情報源ぶんの予定はカレンダーに残します）');
   }
 
   lines.push('');

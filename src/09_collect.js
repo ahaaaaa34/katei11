@@ -33,11 +33,40 @@ function clampDays_(value, fallback, label) {
   return Math.floor(value);
 }
 
+// ---------------------------------------------------------------------------
+// 情報源の生死
+//
+// 「今回は出てこなかった」には2つの意味がある。本当に無くなった（発表日が
+// 動いた・しきい値を上げた）のと、その情報源に今回つながらなかっただけ、の
+// 2つ。後者を消してしまうと、通信が不調な日だけカレンダーから決算や CPI が
+// 消える。区別できるように、落ちた情報源をここに控えておく。
+// ---------------------------------------------------------------------------
+
+let SOURCE_DOWN_ = {};
+
+function resetSourceHealth_() { SOURCE_DOWN_ = {}; }
+
+function markSourceDown_(name, why) {
+  if (!Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name)) {
+    log_('情報源 ' + name + ' は今回使えませんでした（既存の予定は残します）'
+         + (why ? ': ' + why : ''));
+  }
+  SOURCE_DOWN_[name] = why || '取得できませんでした';
+}
+
+function sourceIsDown_(name) {
+  return Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name || '');
+}
+
+/** 今回落ちていた情報源の名前（実行結果の報告に使う）。 */
+function downSources_() { return Object.keys(SOURCE_DOWN_); }
+
 /**
  * 有効な情報源すべてから集めて、重複を解消し、条件で絞る。
  * ひとつの情報源が落ちても同期全体は止めない。
  */
 function collectEvents_(ctx) {
+  resetSourceHealth_();
   const providers = [];
   if (CONFIG.providers.rules) providers.push({ name: 'rules', run: providerRules_ });
   if (CONFIG.providers.fomc) providers.push({ name: 'fomc', run: providerFomc_ });
@@ -53,6 +82,7 @@ function collectEvents_(ctx) {
       found = provider.run(ctx) || [];
     } catch (err) {
       log_('情報源 ' + provider.name + ' でエラー（スキップします）: ' + err);
+      markSourceDown_(provider.name, String(err));
       return;
     }
     log_(provider.name + ': ' + found.length + ' 件');
@@ -68,14 +98,57 @@ function collectEvents_(ctx) {
   });
 }
 
-/** 同じ発表を同じ日に報告しているものをひとつにまとめる。 */
+/**
+ * 同じ発表を報告しているものをひとつにまとめる。
+ *
+ * まとめる基準は2段構え。
+ *
+ *  1. **指標の地元の日付**（米 CPI なら米東部の 1/11）。
+ *     情報源によって発表時刻の申告が少し違う（FRED＋カタログは 8:30 ET、
+ *     集計サイトは 7:45 ET など）と、表示タイムゾーンによっては真夜中を
+ *     またいで「別の日の別の発表」に見えてしまう。実際に起きた例：
+ *     シドニー表示だと 1/11 12:45Z が 1/11、1/11 13:30Z が 1/12 になり、
+ *     同じ CPI がカレンダーに2つ並んだ。地元の日付なら、どちらも 1/11。
+ *
+ *  2. **表示日**。予定 ID は表示日から決まるので、ここが重なったままだと
+ *     同じ ID の予定を2つ作ろうとして、片方が黙って消える。
+ */
 function mergeEvents_(events, timezone) {
-  const byUid = {};
-  events.forEach(function (event) {
-    const uid = eventUid_(event, timezone);
-    byUid[uid] = byUid[uid] ? mergeEvent_(byUid[uid], event) : event;
+  const byRelease = groupMerge_(events, function (event) {
+    return releaseKey_(event, timezone);
   });
-  return Object.keys(byUid).map(function (uid) { return byUid[uid]; });
+  return groupMerge_(byRelease, function (event) {
+    return eventUid_(event, timezone);
+  });
+}
+
+/** 同じ鍵になったものを mergeEvent_ でまとめる（最初に現れた順は保つ）。 */
+function groupMerge_(events, keyOf) {
+  const byKey = {};
+  const order = [];
+  events.forEach(function (event) {
+    const key = keyOf(event);
+    if (Object.prototype.hasOwnProperty.call(byKey, key)) {
+      byKey[key] = mergeEvent_(byKey[key], event);
+      return;
+    }
+    byKey[key] = event;
+    order.push(key);
+  });
+  return order.map(function (key) { return byKey[key]; });
+}
+
+/**
+ * 「どの発表か」を表す鍵。指標の地元のタイムゾーンで日付を取る。
+ *
+ * 終日の予定（休場日など）は、表示タイムゾーンのその日そのものが中身なので
+ * 地元の日付に直すとかえってずれる。表示日で見る。
+ */
+function releaseKey_(event, timezone) {
+  if (event.allDay) return eventUid_(event, timezone);
+  const indicator = indicator_(event.indicatorId);
+  const tz = indicator ? indicatorTimezone_(indicator) : ET;
+  return event.indicatorId + '@' + dateKey_(localDate_(event.start, tz));
 }
 
 /**

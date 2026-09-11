@@ -2554,4 +2554,426 @@ suite('回帰: 名前が同じ指標に別の数値が入る', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('回帰: 回線の不調で予定の日付が動く', () => {
+  const FRED_ROWS = [{ release_id: 10, release_name: 'Consumer Price Index',
+                       date: '2026-09-11' }];
+
+  function cpiOnly(calendar, fredWorks) {
+    const api = loadGas({
+      Calendar: calendar,
+      properties: Object.assign({ _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+                                fredWorks ? { FRED_API_KEY: 'k' } : {}),
+      UrlFetchApp: {
+        fetch: (url) => {
+          if (url.indexOf('stlouisfed') === -1 || !fredWorks) throw new Error('down');
+          return { getResponseCode: () => 200,
+                   getContentText: () => JSON.stringify({ count: 1,
+                                                          release_dates: FRED_ROWS }) };
+        },
+      },
+    });
+    Object.assign(api.CONFIG.providers, { earnings: false, investing: false,
+                                          fomcAutoFetch: false, market: false, fomc: false });
+    api.CONFIG.filter.include = ['us_cpi'];
+    api.CONFIG.filter.minImpact = 101;   // CPI だけを見る
+    return api;
+  }
+
+  function sync(calendar, fredWorks) {
+    const api = cpiOnly(calendar, fredWorks);
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const plan = api.buildPlan_('c', api.collectEvents_(ctx),
+                                api.listManagedEvents_('c', ctx.start, ctx.end), ctx);
+    api.applyPlan_(plan);
+    return plan;
+  }
+
+  function stored(calendar) {
+    const item = [...calendar.events.values()][0];
+    return item && {
+      date: (item.start.dateTime || item.start.date).slice(0, 10),
+      confidence: item.extendedProperties.private.confidence,
+    };
+  }
+
+  test('公式の日付で置いたあとは、取得に失敗しても動かない', () => {
+    const calendar = fakeCalendar();
+    sync(calendar, false);
+    eq(stored(calendar), { date: '2026-09-14', confidence: 'estimated' },
+       '最初は概算で置く');
+    sync(calendar, true);
+    eq(stored(calendar), { date: '2026-09-11', confidence: 'official' },
+       '公式が来たら置き換わる');
+
+    sync(calendar, false);
+    eq(stored(calendar), { date: '2026-09-11', confidence: 'official' },
+       '取得に失敗しても概算に戻さない');
+    sync(calendar, false);
+    sync(calendar, false);
+    eq(stored(calendar), { date: '2026-09-11', confidence: 'official' });
+    eq(calendar.events.size, 1, '重複もしない');
+  });
+
+  test('不調が続いても書き込みが発生しない', () => {
+    const calendar = fakeCalendar();
+    sync(calendar, false);
+    sync(calendar, true);
+    calendar.calls.length = 0;
+    [false, false, true, false, true].forEach((works) => sync(calendar, works));
+    eq(calendar.calls.filter((c) => c[0] !== 'events.list').length, 0,
+       '回線が揺れても API を叩かない');
+  });
+
+  test('公式の日付が本当に変わったときは、ちゃんと動く', () => {
+    const calendar = fakeCalendar();
+    sync(calendar, true);
+    eq(stored(calendar).date, '2026-09-11');
+    FRED_ROWS[0].date = '2026-09-17';   // 発表日が延期された
+    sync(calendar, true);
+    eq(stored(calendar), { date: '2026-09-17', confidence: 'official' },
+       '公式どうしの変更は反映する');
+    FRED_ROWS[0].date = '2026-09-11';   // 後始末
+  });
+
+  test('根拠が同じなら、記憶より新しい方を採る', () => {
+    // 弱い予定を止めるのは「より確かな予定がある」ときだけ。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const older = api.toCalendarResource_(event(api, {
+      indicatorId: 'us_cpi', confidence: 'rule',
+      start: api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York') }));
+    const existing = [{ id: older.id, start: older.start, end: older.end,
+                        extendedProperties: older.extendedProperties }];
+    const newer = event(api, { indicatorId: 'us_cpi', confidence: 'rule',
+      start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') });
+    const plan = api.buildPlan_('c', [newer], existing,
+                                { start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                  timezone: 'Asia/Tokyo' });
+    eq(plan.created.length, 1, '同格なら新しい方に差し替える');
+    eq(plan.deleted.length, 1);
+  });
+
+  test('離れた日付の予定は記憶として使わない（別の発表なので）', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const lastMonth = api.toCalendarResource_(event(api, {
+      indicatorId: 'us_cpi', confidence: 'official',
+      start: api.zonedTime_(Y(2026, 8, 12), '08:30', 'America/New_York') }));
+    const existing = [{ id: lastMonth.id, start: lastMonth.start, end: lastMonth.end,
+                        extendedProperties: lastMonth.extendedProperties }];
+    const thisMonth = event(api, { indicatorId: 'us_cpi', confidence: 'estimated',
+      start: api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York') });
+    const plan = api.buildPlan_('c', [thisMonth], existing,
+                                { start: Y(2026, 8, 1), end: Y(2026, 9, 30),
+                                  timezone: 'Asia/Tokyo' });
+    eq(plan.created.length, 1, '先月の予定は今月の判断に使わない');
+  });
+
+  test('根拠は予定に記録される（次回の判断材料になる）', () => {
+    const resource = G.toCalendarResource_(event(G, { confidence: 'official' }));
+    eq(resource.extendedProperties.private.confidence, 'official');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('回帰: 情報源が落ちると中身が消える', () => {
+  const INV_ROW = '<tr data-event-datetime="2026/09/11 12:45:00">'
+    + '<td class="left event">Core CPI (MoM)</td>'
+    + '<td id="eventActual_1">0.2%</td><td id="eventForecast_1">0.3%</td></tr>';
+  const FRED_ROWS = [{ release_id: 10, release_name: 'Consumer Price Index',
+                       date: '2026-09-11' }];
+
+  function api(calendar, store, up) {
+    const built = loadGas({
+      Calendar: calendar,
+      properties: store,
+      UrlFetchApp: {
+        fetch: (url) => {
+          const which = url.indexOf('stlouisfed') !== -1 ? 'fred' : 'inv';
+          if (!up[which]) throw new Error('down');
+          return { getResponseCode: () => 200, getContentText: () => (which === 'fred'
+            ? JSON.stringify({ count: 1, release_dates: FRED_ROWS })
+            : JSON.stringify({ data: INV_ROW })) };
+        },
+      },
+    });
+    Object.assign(built.CONFIG.providers, { earnings: false, investing: true,
+                                            fomcAutoFetch: false, market: false, fomc: false });
+    built.CONFIG.filter.include = ['us_cpi'];
+    built.CONFIG.filter.minImpact = 101;
+    return built;
+  }
+
+  function sync(calendar, store, up) {
+    const built = api(calendar, store, up);
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const existing = built.listManagedEvents_('c', ctx.start, ctx.end);
+    const enriched = built.inheritFromExisting_(built.collectEvents_(ctx), existing);
+    const plan = built.buildPlan_('c', enriched, existing, ctx);
+    built.applyPlan_(plan);
+    Object.keys(built._store).forEach((k) => { store[k] = built._store[k]; });
+    return plan;
+  }
+
+  // カレンダーに書き込む dateTime は UTC の ISO 文字列。
+  // この題材では Investing の時刻を UTC として読むので（investingAssumeTz）、
+  // 12:45 はそのまま 12:45Z ＝ 日本時間 21:45、表示日は 9/11 のまま。
+  function held(calendar) {
+    const item = [...calendar.events.values()][0];
+    const props = item.extendedProperties.private;
+    return { at: item.start.dateTime,
+             forecast: props.f, actual: props.a, exact: props.exact };
+  }
+
+  const HELD = { at: '2026-09-11T12:45:00.000Z', forecast: '0.3%',
+                 actual: '0.2%', exact: '1' };
+
+  test('実測時刻と発表された数値は、情報源が落ちても消えない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)', FRED_API_KEY: 'k' };
+    sync(calendar, store, { fred: true, inv: true });
+    eq(calendar.events.size, 1, '対象は CPI ひとつだけ');
+    eq(held(calendar), HELD, '慣例値 12:30Z ではなく実測の 12:45Z が入る');
+
+    const plan = sync(calendar, store, { fred: true, inv: false });
+    eq(held(calendar), HELD, 'Investing が落ちても中身を保つ');
+    eq(plan.created.length + plan.updated.length + plan.deleted.length, 0,
+       '書き込みも発生しない');
+  });
+
+  test('両方落ちても、日付も時刻も数値も消えない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)', FRED_API_KEY: 'k' };
+    sync(calendar, store, { fred: true, inv: true });
+    const plan = sync(calendar, store, { fred: false, inv: false });
+    eq(held(calendar), HELD, '規則だけになっても据え置く');
+    eq(plan.created.length + plan.updated.length + plan.deleted.length, 0,
+       '書き込みも発生しない');
+  });
+
+  test('新しい値が来たら、ちゃんと上書きする', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)', FRED_API_KEY: 'k' };
+    sync(calendar, store, { fred: true, inv: true });
+    eq(held(calendar).actual, '0.2%');
+
+    const built = api(calendar, store, { fred: true, inv: true });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const existing = built.listManagedEvents_('c', ctx.start, ctx.end);
+    const fresh = built.collectEvents_(ctx).map((e) => Object.assign({}, e, { actual: '0.4%' }));
+    const enriched = built.inheritFromExisting_(fresh, existing);
+    eq(enriched[0].actual, '0.4%', '記憶より新しい値を優先する');
+  });
+
+  test('説明文は、どのモジュールが勝ったかで変わらない', () => {
+    // 情報源が入れ替わっただけで説明文が変わると、更新が走り続ける。
+    const base = { indicatorId: 'us_cpi', title: 'CPI', impact: 98,
+                   confidence: 'official', exactTime: true,
+                   start: new Date(Date.UTC(2026, 8, 11, 12, 30)),
+                   end: new Date(Date.UTC(2026, 8, 11, 13, 0)) };
+    const fromFred = G.renderDescription_(G.makeEvent_(
+      Object.assign({}, base, { source: 'fred' })));
+    const fromSite = G.renderDescription_(G.makeEvent_(
+      Object.assign({}, base, { source: 'investing' })));
+    eq(fromFred, fromSite);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('週次まとめは、実際にカレンダーにあるものから作る', () => {
+  test('据え置いた予定を読み戻せる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const original = event(api, { indicatorId: 'us_cpi', confidence: 'official',
+                                  forecast: '0.3%', actual: '0.2%', exactTime: true,
+                                  start: api.zonedTime_(Y(2026, 9, 11), '08:30',
+                                                        'America/New_York') });
+    const resource = api.toCalendarResource_(original);
+    const restored = api.eventFromResource_({
+      id: resource.id, summary: resource.summary, start: resource.start,
+      end: resource.end, extendedProperties: resource.extendedProperties });
+
+    eq(restored.indicatorId, 'us_cpi');
+    eq(restored.confidence, 'official');
+    eq([restored.forecast, restored.actual], ['0.3%', '0.2%']);
+    eq(restored.start.toISOString(), original.start.toISOString());
+    eq(restored.impact, original.impact);
+  });
+
+  test('終日の予定も読み戻せる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const holiday = event(api, { indicatorId: 'market_holiday', impact: 60,
+                                 allDay: true, confidence: 'rule' });
+    const resource = api.toCalendarResource_(holiday);
+    const restored = api.eventFromResource_({
+      id: resource.id, summary: resource.summary, start: resource.start,
+      end: resource.end, extendedProperties: resource.extendedProperties });
+    ok(restored.allDay);
+    eq(K(api.localDate_(restored.start, 'Asia/Tokyo')),
+       K(api.localDate_(holiday.start, 'Asia/Tokyo')));
+  });
+
+  test('カタログに無い指標（決算）でも落ちない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const restored = api.eventFromResource_({
+      id: 'ecx', summary: '🔴 🇺🇸 NVDA 決算発表 (引け後)',
+      start: { dateTime: '2026-11-19T06:15:00+09:00' },
+      end: { dateTime: '2026-11-19T06:45:00+09:00' },
+      extendedProperties: { private: { ecal: '1', indicator: 'earnings_NVDA',
+                                       impact: '95', confidence: 'official' } },
+    });
+    ok(restored);
+    eq(restored.impact, 95);
+    eq(restored.indicatorId, 'earnings_NVDA');
+  });
+
+  test('壊れた予定を読み戻そうとしても落ちない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.eventFromResource_({ id: 'x', start: { dateTime: 'めちゃくちゃ' },
+                                end: { dateTime: 'めちゃくちゃ' },
+                                extendedProperties: { private: {} } }), null);
+  });
+
+  test('据え置いた予定が、まとめの一覧に残る', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false,
+                                          investing: false, fomcAutoFetch: false });
+    // カレンダーには公式の 9/11、今回の計算では概算の 9/14 が出る状況
+    const official = event(api, { indicatorId: 'us_cpi', impact: 98, confidence: 'official',
+      start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') });
+    const resource = api.toCalendarResource_(official);
+    const existing = [{ id: resource.id, summary: resource.summary, start: resource.start,
+                        end: resource.end,
+                        extendedProperties: resource.extendedProperties }];
+    const weak = event(api, { indicatorId: 'us_cpi', impact: 98, confidence: 'estimated',
+      start: api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York') });
+
+    const shown = api.displayEvents_([weak], existing);
+    eq(shown.length, 1);
+    eq(K(api.localDate_(shown[0].start, 'Asia/Tokyo')), '2026-09-11',
+       'カレンダーにある方が一覧に出ること');
+    eq(shown[0].confidence, 'official');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('同じ発表をひとつにまとめる基準', () => {
+  test('時刻つきの予定は、指標の地元の日付でまとめる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.timezone = 'Australia/Sydney';
+    // どちらも米東部 1/11 の CPI。集計サイトが 7:45 ET、FRED＋カタログが
+    // 8:30 ET と言う。シドニー（この時期は UTC+11）だと 1/11 と 1/12 に割れる。
+    const site = event(api, { indicatorId: 'us_cpi', confidence: 'reported',
+      exactTime: true, start: new Date(Date.UTC(2027, 0, 11, 12, 45)) });
+    const fred = event(api, { indicatorId: 'us_cpi', confidence: 'official',
+      start: new Date(Date.UTC(2027, 0, 11, 13, 30)) });
+    eq(K(api.localDate_(site.start, 'Australia/Sydney')), '2027-01-11');
+    eq(K(api.localDate_(fred.start, 'Australia/Sydney')), '2027-01-12',
+       '表示日は割れていること（この題材の前提）');
+    eq(api.releaseKey_(site, 'Australia/Sydney'), api.releaseKey_(fred, 'Australia/Sydney'),
+       '地元の日付では同じ発表');
+
+    const merged = api.mergeEvents_([site, fred], 'Australia/Sydney');
+    eq(merged.length, 1, 'カレンダーに2つ並ばないこと');
+    eq(merged[0].confidence, 'official');
+    eq(merged[0].exactTime, true, '実測時刻は残ること');
+  });
+
+  test('終日の予定は、表示日そのものでまとめる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    // 休場日は「その日が休み」という中身なので、米東部に直すとずれる。
+    const holiday = event(api, { indicatorId: 'market_holiday', impact: 60,
+      allDay: true, confidence: 'rule',
+      start: api.zonedTime_(Y(2026, 11, 26), '00:00', 'Asia/Tokyo') });
+    eq(api.releaseKey_(holiday, 'Asia/Tokyo'), 'market_holiday@2026-11-26');
+    eq(api.releaseKey_(holiday, 'Asia/Tokyo'), api.eventUid_(holiday, 'Asia/Tokyo'),
+       '終日の予定は、まとめる鍵と予定 ID の日付がそろっていること');
+  });
+
+  test('別の週の同じ指標は、まとめない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const a = event(api, { indicatorId: 'us_jobless_claims', impact: 75,
+      start: api.zonedTime_(Y(2026, 9, 3), '08:30', 'America/New_York') });
+    const b = event(api, { indicatorId: 'us_jobless_claims', impact: 75,
+      start: api.zonedTime_(Y(2026, 9, 10), '08:30', 'America/New_York') });
+    eq(api.mergeEvents_([a, b], 'Asia/Tokyo').length, 2, '週次は毎週別の発表');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('情報源が落ちているときの整理', () => {
+  function withExisting(api, events) {
+    return events.map((e) => {
+      const r = api.toCalendarResource_(e);
+      return { id: r.id, summary: r.summary, start: r.start, end: r.end,
+               extendedProperties: r.extendedProperties };
+    });
+  }
+
+  test('落ちた情報源の予定は消さない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const stored = withExisting(api, [event(api, { indicatorId: 'us_cpi', impact: 98,
+      source: 'fred', start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') })]);
+
+    api.resetSourceHealth_();
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 1,
+       '情報源が元気なら、出てこなくなったものは消す');
+
+    api.resetSourceHealth_();
+    api.markSourceDown_('fred', 'つながらなかった');
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 0,
+       '落ちているだけなら残す');
+    eq(api.downSources_(), ['fred']);
+  });
+
+  test('設定で外したものは、情報源が落ちていても消す', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const stored = withExisting(api, [event(api, { indicatorId: 'us_cpi', impact: 98,
+      source: 'fred', start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') })]);
+    api.resetSourceHealth_();
+    api.markSourceDown_('fred', 'つながらなかった');
+
+    api.CONFIG.filter.minImpact = 99;
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 1,
+       'しきい値を上げたぶんは、人が外したのだから消す');
+
+    api.CONFIG.filter.minImpact = 55;
+    api.CONFIG.filter.exclude = ['us_cpi'];
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 1,
+       'exclude も同じ');
+  });
+
+  test('落ちていない情報源の予定は、そのまま整理される', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const stored = withExisting(api, [event(api, { indicatorId: 'us_cpi', impact: 98,
+      source: 'rules', start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') })]);
+    api.resetSourceHealth_();
+    api.markSourceDown_('fred');
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('FRED の対応付けの重なり', () => {
+  test('ひとつの release 名が2つの指標に当たったら知らせる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.fredReleaseOverlaps_(), [], 'いまのカタログには重なりが無いこと');
+
+    api.INDICATORS.push({ id: 'x_dummy', name: 'ダミー', country: 'US', category: 'other',
+                          impact: 50, time: '08:30', schedule: { type: 'none' },
+                          fred_release: 'Consumer Price Index' });
+    const found = api.fredReleaseOverlaps_();
+    eq(found.length, 1, '重なりを1組として報告すること（両方向に2回言わない）');
+    ok(found[0].indexOf('us_cpi') !== -1 && found[0].indexOf('x_dummy') !== -1, found[0]);
+    ok(api.catalogProblems_().length > 0, 'カタログの点検でも拾われること');
+    api.INDICATORS.pop();
+  });
+});
+
+// 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
+require('./props').registerPropertyTests({
+  suite, test, eq, ok, loadGas, fakeCalendar,
+});
+
 process.exitCode = require('./assert').report();

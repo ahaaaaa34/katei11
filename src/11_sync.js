@@ -70,6 +70,15 @@ function toCalendarResource_(event) {
         indicator: event.indicatorId,
         impact: String(event.impact),
         source: event.source,
+        confidence: event.confidence,
+        // 次回の判断材料として、失いたくない中身を残しておく。
+        // 情報源が一時的に落ちても、実測の時刻や発表された数値が
+        // カレンダーから消えないようにするため。
+        exact: event.exactTime ? '1' : '0',
+        at: event.start.toISOString(),
+        a: event.actual || '',
+        f: event.forecast || '',
+        p: event.previous || '',
       },
     },
   };
@@ -230,12 +239,152 @@ function resourceDisplayDate_(item) {
   return null;
 }
 
+/**
+ * すでにカレンダーにある中身を引き継ぐ。
+ *
+ * 情報源が一時的に落ちただけで、実測の発表時刻や、すでに出た結果の数値が
+ * 消えてしまうのはおかしい。同じ発表（同じ予定 ID）について、前回書いた方が
+ * 詳しいなら、その部分を引き継ぐ。
+ * 今回の方が詳しければ今回が勝つので、値の更新は妨げない。
+ */
+function inheritFromExisting_(events, existing) {
+  const byId = {};
+  existing.forEach(function (item) { byId[item.id] = item; });
+
+  return events.map(function (event) {
+    const item = byId[eventCalendarId_(event, CONFIG.timezone)];
+    if (!item) return event;
+    const props = (item.extendedProperties && item.extendedProperties.private) || {};
+
+    const patch = {};
+    if (!event.actual && props.a) patch.actual = props.a;
+    if (!event.forecast && props.f) patch.forecast = props.f;
+    if (!event.previous && props.p) patch.previous = props.p;
+    if (confidenceRank_(props.confidence) > confidenceRank_(event.confidence)) {
+      // 同じ日付なので、根拠だけ引き継いでよい。
+      patch.confidence = props.confidence;
+    }
+    if (!event.exactTime && props.exact === '1' && props.at) {
+      const remembered = new Date(props.at);
+      if (!isNaN(remembered.getTime())) {
+        patch.exactTime = true;
+        patch.start = remembered;
+        patch.end = new Date(remembered.getTime() + (event.end - event.start));
+      }
+    }
+    if (!Object.keys(patch).length) return event;
+
+    const merged = {};
+    Object.keys(event).forEach(function (key) { merged[key] = event[key]; });
+    Object.keys(patch).forEach(function (key) { merged[key] = patch[key]; });
+    return merged;
+  });
+}
+
+/**
+ * すでにカレンダーにある、より確かな予定を「記憶」として使う。
+ *
+ * FRED が一時的に落ちただけで、公式の発表日で置いた予定が概算の日付に
+ * 戻ってしまうと、利用者のカレンダー上で予定が行ったり来たりする。
+ * 回線の不調で日付が動くようでは、そこに書いてある日付を信じられない。
+ *
+ * そこで、同じ指標の近い日付に、より確かな根拠の予定がすでにあるなら、
+ * 今回の弱い予定は捨てて、あるものをそのまま残す。
+ * 公式の日付が本当に変わったときは、新しい方も official なので置き換わる。
+ */
+function keepStrongerExisting_(events, existing) {
+  const anchors = {};
+  existing.forEach(function (item) {
+    const props = (item.extendedProperties && item.extendedProperties.private) || {};
+    if (!props.indicator || !props.confidence) return;
+    const day = resourceDisplayDate_(item);
+    if (!day) return;
+    (anchors[props.indicator] = anchors[props.indicator] || []).push({
+      id: item.id, day: day, rank: confidenceRank_(props.confidence),
+    });
+  });
+
+  const keptIds = {};
+  const replaced = [];
+  const kept = events.filter(function (event) {
+    const nearby = anchors[event.indicatorId];
+    if (!nearby) return true;
+    const day = localDate_(event.start, CONFIG.timezone);
+    const mine = confidenceRank_(event.confidence);
+    for (let i = 0; i < nearby.length; i++) {
+      if (nearby[i].rank <= mine) continue;
+      if (Math.abs(daysBetween_(day, nearby[i].day)) > SUPERSEDE_WINDOW_DAYS) continue;
+      log_(event.indicatorId + ': より確かな予定が既にあるので、'
+           + dateKey_(day) + ' の弱い予定は作りません');
+      keptIds[nearby[i].id] = true;
+      replaced.push(nearby[i].id);
+      return false;
+    }
+    return true;
+  });
+  return { events: kept, keptIds: keptIds, replaced: replaced };
+}
+
+/**
+ * カレンダーに保存してある予定を、表示用のイベントとして読み戻す。
+ *
+ * 週次まとめは「その週に何があるか」の一覧なので、今回計算したものではなく
+ * **実際にカレンダーに入っているもの**から作らないと、情報源が揺れるたびに
+ * まとめだけが書き換わる。差分計算には使わない（復元がわずかに違っても
+ * 毎回更新が走ってしまうため、用途を表示に限る）。
+ */
+function eventFromResource_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  const indicator = indicator_(props.indicator);
+  const allDay = !!(item.start && item.start.date);
+  const start = allDay
+    ? zonedTime_(parseDateKey_(item.start.date), '00:00', CONFIG.timezone)
+    : new Date(item.start.dateTime);
+  if (isNaN(start.getTime())) return null;
+  const end = allDay ? new Date(start.getTime() + 86400000)
+                     : new Date(new Date(item.end.dateTime).getTime());
+
+  return makeEvent_({
+    indicatorId: props.indicator || 'unknown',
+    title: indicator ? indicator.name : String(item.summary || '').replace(/^[^ ]+ /, ''),
+    start: start,
+    end: isNaN(end.getTime()) ? new Date(start.getTime() + 1800000) : end,
+    impact: Number(props.impact) || (indicator ? indicator.impact : 0),
+    country: indicator ? indicator.country : 'US',
+    // 決算はカタログに無いが、カテゴリで絞っている人のために復元しておく。
+    category: indicator ? indicator.category
+      : (String(props.indicator || '').indexOf('earnings_') === 0 ? 'earnings' : 'other'),
+    source: props.source || 'rules',
+    confidence: props.confidence || 'estimated',
+    allDay: allDay,
+    exactTime: props.exact === '1',
+    actual: props.a || null,
+    forecast: props.f || null,
+    previous: props.p || null,
+  });
+}
+
+/** 表示用に、「今回の予定 ＋ 据え置いた既存の予定」をそろえる。 */
+function displayEvents_(events, existing) {
+  const guarded = keepStrongerExisting_(inheritFromExisting_(events, existing), existing);
+  const byId = {};
+  existing.forEach(function (item) { byId[item.id] = item; });
+  const restored = [];
+  guarded.replaced.forEach(function (id) {
+    const event = byId[id] ? eventFromResource_(byId[id]) : null;
+    if (event) restored.push(event);
+  });
+  return guarded.events.concat(restored);
+}
+
 function buildPlan_(calendarId, events, existing, ctx) {
   const byId = {};
   existing.forEach(function (item) { byId[item.id] = item; });
 
   const plan = { calendarId: calendarId, created: [], updated: [], unchanged: [], deleted: [] };
-  const seen = {};
+  const guarded = keepStrongerExisting_(inheritFromExisting_(events, existing), existing);
+  const seen = guarded.keptIds;
+  events = guarded.events;
 
   events.forEach(function (event) {
     const resource = toCalendarResource_(event);
@@ -260,9 +409,30 @@ function buildPlan_(calendarId, events, existing, ctx) {
   existing.forEach(function (item) {
     if (seen[item.id]) return;
     if (ctx && !inPruneRange_(item, ctx)) return;
+    if (keepThroughOutage_(item)) return;
     plan.deleted.push(item);
   });
   return plan;
+}
+
+/**
+ * その予定を、情報源が落ちているという理由だけで消さずに残すか。
+ *
+ * 「今回は出てこなかった」には2つの意味がある。本当に無くなった（発表日が
+ * 動いた・しきい値を上げた）のと、その情報源に今回つながらなかっただけ、の
+ * 2つ。後者で消すと、通信が不調な日だけカレンダーから決算や CPI が消えて
+ * しまう。消してよいのは、その情報源がちゃんと動いた上で「もう無い」と
+ * 言っているときだけ。
+ *
+ * ただし設定で対象外になったもの（しきい値を上げた・exclude に入れた）は、
+ * 情報源の生死に関係なく整理する。人が明示的に外したものだから。
+ */
+function keepThroughOutage_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  if (!sourceIsDown_(props.source)) return false;
+  const restored = eventFromResource_(item);
+  if (!restored) return true;   // 読み戻せないものは、判断がつくまで触らない
+  return applyFilter_([restored]).length > 0;
 }
 
 function inPruneRange_(item, ctx) {

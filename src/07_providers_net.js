@@ -27,7 +27,11 @@ function providerFred_(ctx) {
   // 米東部の発表日と表示タイムゾーンの日付は1日ずれることがあるので、
   // 前後1日ぶん広く取ってから表示日で絞る。
   const rows = fredReleaseDates_(apiKey, addDays_(ctx.start, -1), addDays_(ctx.end, 1));
-  if (rows === null) return [];
+  if (rows === null) {
+    // つながらなかっただけ。既に書き込んである公式日程を消させない。
+    markSourceDown_('fred', 'FRED に接続できませんでした');
+    return [];
+  }
 
   const events = [];
   // ひとつの指標に複数の release 名が当たったら、正規表現が緩すぎる合図。
@@ -205,7 +209,12 @@ function providerEarnings_(ctx) {
       return NASDAQ_EARNINGS + dateKey_(day);
     }));
     responses.forEach(function (payload, index) {
-      if (payload === null) { failures++; return; }
+      if (payload === null) {
+        failures++;
+        // 取れなかった日の決算は「無い」のではなく「分からない」。
+        markSourceDown_('earnings', '決算カレンダーの一部を取得できませんでした');
+        return;
+      }
       const rows = (payload.data && payload.data.rows) || [];
       rows.forEach(function (row) {
         const event = earningsEvent_(chunk[index], row, tickers);
@@ -308,13 +317,17 @@ function providerInvesting_(ctx) {
       Accept: 'application/json, text/javascript, */*; q=0.01',
     },
   });
-  if (text === null) return [];
+  if (text === null) {
+    markSourceDown_('investing', 'Investing.com に接続できませんでした');
+    return [];
+  }
 
   let fragment;
   try {
     fragment = JSON.parse(text).data || '';
   } catch (err) {
     log_('Investing.com の応答を解釈できませんでした');
+    markSourceDown_('investing', '応答を解釈できませんでした');
     return [];
   }
   return investingRowsToEvents_(parseInvestingRows_(fragment), ctx);
