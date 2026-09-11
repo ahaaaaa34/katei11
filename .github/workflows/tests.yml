@@ -32,6 +32,13 @@ jobs:
         if: matrix.node-version == '22'
         run: FUZZ_SEED=${{ github.run_number }} FUZZ_N=250 npm test
 
+      # 日付・タイムゾーン・祝日の計算を、Python で独立に書いたものと
+      # 突き合わせる。実装とテストが同じ思い込みを共有していると見えない
+      # 誤りを、別言語・別のタイムゾーン実装（zoneinfo と ICU）で炙り出す。
+      - name: 独立実装と突き合わせる
+        if: matrix.node-version == '22'
+        run: npm run diff
+
   # テストが本当にバグを捕まえるかを検査する。修正を1つずつ巻き戻して、
   # 対応するテストが落ちなければ失敗させる。
   mutation:

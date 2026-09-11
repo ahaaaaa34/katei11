@@ -1248,10 +1248,21 @@ function observed_(date) {
   return date;
 }
 
-/** 統計局が閉まる連邦休日。 */
+/**
+ * 統計局が閉まる連邦休日。**その年のうちに休みになる日**を返す。
+ *
+ * 元日が土曜の年は、前日の金曜（前年12月31日）が振替休日になる。
+ * これを翌年の表に入れたままにすると、12月31日を営業日と数えてしまい、
+ * 「その月の最終営業日」に置く指標が1日ずれる（2021・2027・2032年）。
+ * 落ちる先の年の表に入れる。
+ */
 function federalHolidays_(year) {
   const out = {};
-  out[dateKey_(observed_(ymd_(year, 1, 1)))] = '元日';
+  const newYear = observed_(ymd_(year, 1, 1));
+  if (newYear.getUTCFullYear() === year) out[dateKey_(newYear)] = '元日';
+  // 翌年の元日が手前に落ちてくる年は、それもこの年の休みとして数える。
+  const nextNewYear = observed_(ymd_(year + 1, 1, 1));
+  if (nextNewYear.getUTCFullYear() === year) out[dateKey_(nextNewYear)] = '元日（振替）';
   out[dateKey_(nthWeekday_(year, 1, WEEKDAY_NUM.mon, 3))] = 'キング牧師記念日';
   out[dateKey_(nthWeekday_(year, 2, WEEKDAY_NUM.mon, 3))] = '大統領の日';
   out[dateKey_(nthWeekday_(year, 5, WEEKDAY_NUM.mon, -1))] = '戦没者追悼記念日';

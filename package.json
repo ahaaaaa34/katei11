@@ -8,6 +8,7 @@
     "bundle": "node tools/bundle.js",
     "mutate": "python3 tools/mutate.py",
     "coverage": "node tools/coverage.js",
+    "diff": "node tools/differential-dump.js > /tmp/econ-diff.json && python3 tools/differential.py /tmp/econ-diff.json",
     "push": "npm run bundle && clasp push",
     "check": "npm test && npm run bundle"
   },

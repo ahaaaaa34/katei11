@@ -53,6 +53,13 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("翌年から落ちてくる振替休日を数えない", "src/04_schedule.js",
+     "  const nextNewYear = observed_(ymd_(year + 1, 1, 1));\n"
+     "  if (nextNewYear.getUTCFullYear() === year) out[dateKey_(nextNewYear)] = '元日（振替）';",
+     ""),
+    ("振替で前年に落ちた元日も、その年の表に残す", "src/04_schedule.js",
+     "  if (newYear.getUTCFullYear() === year) out[dateKey_(newYear)] = '元日';",
+     "  out[dateKey_(newYear)] = '元日';"),
     ("型の名前にプロトタイプの鍵を通す", "src/05_catalog.js",
      "  return typeof name === 'string'\n"
      "      && Object.prototype.hasOwnProperty.call(table, name);",
