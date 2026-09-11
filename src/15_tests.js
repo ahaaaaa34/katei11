@@ -75,6 +75,23 @@ function runTests() {
     if (problems.length) throw new Error(problems.join(' / '));
   });
 
+  check('根拠を偽っている予定が無い', function () {
+    // 外部から何も取っていない状態で「公式」を名乗る予定があってはならない。
+    const saved = JSON.parse(JSON.stringify(CONFIG.providers));
+    CONFIG.providers.fred = false;
+    CONFIG.providers.earnings = false;
+    CONFIG.providers.investing = false;
+    CONFIG.providers.fomcAutoFetch = false;
+    try {
+      const events = collectEvents_({ start: ymd_(2026, 9, 1), end: ymd_(2026, 10, 31),
+                                      timezone: CONFIG.timezone });
+      const lying = events.filter(function (e) { return e.confidence === 'official'; });
+      eq(lying.length, 0, lying.map(function (e) { return e.indicatorId; }).join(','));
+    } finally {
+      Object.keys(saved).forEach(function (k) { CONFIG.providers[k] = saved[k]; });
+    }
+  });
+
   check('通信なしで1か月ぶんの予定が組める', function () {
     const saved = JSON.parse(JSON.stringify(CONFIG.providers));
     CONFIG.providers.fred = false;

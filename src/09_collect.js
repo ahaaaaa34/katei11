@@ -88,13 +88,13 @@ function mergeEvents_(events, timezone) {
 function dropSupersededEstimates_(events, timezone) {
   const confirmed = {};
   events.forEach(function (event) {
-    if (event.estimated) return;
+    if (isEstimated_(event)) return;
     const key = event.indicatorId;
     (confirmed[key] = confirmed[key] || []).push(localDate_(event.start, timezone));
   });
 
   return events.filter(function (event) {
-    if (!event.estimated) return true;
+    if (!isEstimated_(event)) return true;
     const known = confirmed[event.indicatorId] || [];
     const day = localDate_(event.start, timezone);
     for (let i = 0; i < known.length; i++) {

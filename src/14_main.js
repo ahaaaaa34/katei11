@@ -7,6 +7,8 @@
  *   showStatus()        設定・情報源・メンテナンス状況の確認
  *   removeAllEvents()   このツールが作った予定を削除する
  *   uninstall()         自動実行を止める（予定は残ります）
+ *   dataQuality()       いま入っているデータがどれだけ確かかを点検する
+ *   verifyRules()       発表規則の当たり具合を、FRED の実績で測る
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   runTests()          日付計算などの自己テスト
  */
@@ -320,13 +322,13 @@ function showStatus() {
 function meetingCoverage_() {
   const meetings = allMeetings_('fomc');
   if (!meetings.length) return '未登録';
-  let manual = '', auto = '';
+  let last = '';
+  let verified = 0;
   meetings.forEach(function (meeting) {
-    if (meeting.auto) { if (meeting.date > auto) auto = meeting.date; }
-    else if (meeting.date > manual) manual = meeting.date;
+    if (meeting.date > last) last = meeting.date;
+    if (meeting.confidence === 'official') verified++;
   });
-  return '手入力 ' + (manual || 'なし') + ' まで'
-       + (auto ? ' / 自動取得 ' + auto + ' まで' : '');
+  return last + ' まで / 公式と照合済み ' + verified + ' 件中 ' + meetings.length + ' 件';
 }
 
 /**
@@ -367,6 +369,148 @@ function checkFomcAutoFetch() {
   lines.push('* 印は経済見通し(SEP)が同時公表される回。');
   lines.push('現在の状態: ' + meetingCoverage_());
   lines.push('手入力（02_meetings.js）がある年は、取得結果があっても使いません。');
+
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+/**
+ * いまカレンダーに入る予定が、どれだけ確かな根拠に基づいているかを出す。
+ *
+ * 「正しいデータが入っているか」を自分で確かめられるようにするための関数。
+ * 数えるだけでなく、確かにするために何をすればよいかまで書く。
+ */
+function dataQuality() {
+  validateConfig_();
+  const ctx = syncWindow_();
+  const events = collectEvents_(ctx);
+
+  const counts = { official: 0, reported: 0, rule: 0, estimated: 0 };
+  const estimatedBy = {};
+  events.forEach(function (event) {
+    counts[event.confidence] = (counts[event.confidence] || 0) + 1;
+    if (isEstimated_(event)) {
+      estimatedBy[event.indicatorId] = (estimatedBy[event.indicatorId] || 0) + 1;
+    }
+  });
+
+  const lines = [];
+  lines.push('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
+             + ' / ' + events.length + ' 件');
+  lines.push('');
+  lines.push('■ 日付の根拠');
+  ['official', 'reported', 'rule', 'estimated'].forEach(function (key) {
+    const bar = new Array(Math.round((counts[key] || 0) / 2) + 1).join('■');
+    lines.push('   ' + (CONFIDENCE_LABEL[key] + '          ').slice(0, 10)
+               + String(counts[key] || 0).padStart(3) + ' 件 ' + bar);
+  });
+
+  const estimatedIds = Object.keys(estimatedBy);
+  if (estimatedIds.length) {
+    lines.push('');
+    lines.push('■ 日付が未確定のもの（件名に「(予定日未確定)」と出ます）');
+    estimatedIds.sort().forEach(function (id) {
+      const indicator = indicator_(id);
+      lines.push('   ' + (indicator ? indicator.name : id)
+                 + ' × ' + estimatedBy[id] + '回');
+    });
+  }
+
+  lines.push('');
+  lines.push('■ FOMC 会合日程');
+  lines.push('   ' + fomcVerificationStatus_());
+
+  const warnings = fredMatchWarnings_();
+  if (warnings.length) {
+    lines.push('');
+    lines.push('■ FRED の対応付けに疑いあり');
+    warnings.forEach(function (text) { lines.push('   ' + text); });
+  }
+
+  lines.push('');
+  lines.push('■ 確かさを上げるには');
+  if (!prop_(PROP_FRED_KEY)) {
+    lines.push('   1. FRED の無料キーを取得して、スクリプト プロパティ '
+               + PROP_FRED_KEY + ' に入れる');
+    lines.push('      → 主要10指標の発表日が公式の確定値になります');
+    lines.push('      https://fred.stlouisfed.org/docs/api/api_key.html');
+  } else {
+    lines.push('   ✅ FRED キーは設定済み');
+  }
+  if (!CONFIG.providers.investing) {
+    lines.push('   2. 00_config.js の providers.investing を true にする');
+    lines.push('      → 発表時刻が実測値になり、予想値・前回値・結果値が入ります');
+  } else {
+    lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
+  }
+  lines.push('   3. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+
+  lines.push('');
+  lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');
+
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+function fomcVerificationStatus_() {
+  const meetings = allMeetings_('fomc');
+  if (!meetings.length) return '未登録';
+  const byConfidence = {};
+  meetings.forEach(function (meeting) {
+    byConfidence[meeting.confidence] = (byConfidence[meeting.confidence] || 0) + 1;
+  });
+  if (byConfidence.official === meetings.length) {
+    return '公式ページと照合済み（' + meetings.length + ' 回ぶん）';
+  }
+  if (!byConfidence.official) {
+    return '未照合（' + meetings.length + ' 回ぶん）'
+         + ' — 公式ページを取得できていません。checkFomcAutoFetch() で確認してください';
+  }
+  return '一部だけ照合済み（照合 ' + byConfidence.official + ' / 未照合 '
+       + (meetings.length - byConfidence.official) + '）';
+}
+
+/**
+ * 発表規則がどれだけ当たっているかを、FRED の過去の実績で測って表示する。
+ * 「第1営業日」「12日ごろ」といった規則は人が書いたものなので、
+ * 信じてよいかどうかは測らないと分からない。
+ */
+function verifyRules() {
+  validateConfig_();
+  if (!prop_(PROP_FRED_KEY)) {
+    const message = 'FRED のキーが必要です。スクリプト プロパティ ' + PROP_FRED_KEY
+                  + ' に設定してください。\n'
+                  + 'https://fred.stlouisfed.org/docs/api/api_key.html';
+    log_(message);
+    return message;
+  }
+
+  const stats = measureRuleAccuracy_(12);
+  if (stats === null) {
+    const message = 'FRED から過去の発表日を取得できませんでした。';
+    log_(message);
+    return message;
+  }
+  if (!stats.length) {
+    const message = '突き合わせられる実績がありませんでした。';
+    log_(message);
+    return message;
+  }
+
+  const lines = ['過去12か月の実際の発表日と、発表規則の予想を突き合わせた結果', '',
+                 '  ずれ(平均)  的中率  最大ずれ  指標', ''];
+  stats.forEach(function (entry) {
+    lines.push('  ' + (entry.meanGap + ' 日').padStart(8)
+               + (entry.exactRate + '%').padStart(8)
+               + (entry.worst + ' 日').padStart(10)
+               + '  ' + entry.name + '（' + entry.samples + '件）');
+  });
+  lines.push('');
+  lines.push('ずれが大きい指標は、01_indicators.js の schedule を見直す価値があります。');
+  lines.push('なお FRED が扱う指標は、実際の同期では公式の発表日が使われるので、');
+  lines.push('規則のずれはカレンダーには出ません。ここで効くのは FRED が扱わない指標です。');
 
   const text = lines.join('\n');
   log_(text);

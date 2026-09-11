@@ -29,7 +29,7 @@ function providerRules_(ctx) {
         country: indicator.country,
         category: indicator.category,
         source: 'rules',
-        estimated: !ruleIsExact_(indicator),
+        confidence: ruleIsExact_(indicator) ? 'rule' : 'estimated',
         period: periodLabel_(date, indicator.period_offset || 0),
         note: indicator.why,
         url: indicator.url,
@@ -45,8 +45,7 @@ function providerRules_(ctx) {
 
 const MINUTES_LAG_DAYS = 21;      // 議事要旨は会合2日目の3週間後
 const AUTO_ORIGIN_NOTE =
-  '\n\n※ この会合日程は Fed の公式ページから自動取得したものです'
-  + '（手入力の日程が尽きた先の年）。';
+  '\n\n※ この会合日程は Fed の公式ページから取得したものです。';
 const BEIGE_BOOK_LEAD_DAYS = 14;  // ベージュブックは会合の2週間前
 
 function providerFomc_(ctx) {
@@ -63,6 +62,10 @@ function providerFomc_(ctx) {
       const sep = !!meeting.sep;
       // 自動取得ぶんは、どこから来た日程かを説明文に残す。
       const origin = meeting.auto ? AUTO_ORIGIN_NOTE : '';
+      // 会合日そのものの確からしさ。議事要旨などの派生は、そこから
+      // 「3週間後」という慣例で導いているので rule 止まりにする。
+      const base = meeting.confidence || 'estimated';
+      const derived = confidenceRank_(base) > confidenceRank_('rule') ? 'rule' : base;
 
       const rate = indicator_(banks[bank].rate);
       if (!rate) return;
@@ -72,7 +75,7 @@ function providerFomc_(ctx) {
                 '利下げ回数の織り込みが一気に書き換わるため、通常会合より値動きが大きい。';
       }
       events.push(fomcEvent_(rate, day, rate.impact, note + origin, null,
-                             { sep: sep, bank: bank, auto: !!meeting.auto }));
+                             { sep: sep, bank: bank, auto: !!meeting.auto }, base));
 
       const presser = banks[bank].presser ? indicator_(banks[bank].presser) : null;
       if (presser) {
@@ -87,12 +90,12 @@ function providerFomc_(ctx) {
           events.push(fomcEvent_(minutes, addDays_(day, MINUTES_LAG_DAYS), minutes.impact,
                                  minutes.why + origin,
                                  day.getUTCFullYear() + '年' + (day.getUTCMonth() + 1) + '月' +
-                                 day.getUTCDate() + '日会合分'));
+                                 day.getUTCDate() + '日会合分', null, derived));
         }
         const beige = indicator_('us_beige_book');
         if (beige) {
           events.push(fomcEvent_(beige, addDays_(day, -BEIGE_BOOK_LEAD_DAYS), beige.impact,
-                                 beige.why + origin));
+                                 beige.why + origin, null, null, derived));
         }
       }
     });
@@ -101,7 +104,7 @@ function providerFomc_(ctx) {
   return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
-function fomcEvent_(indicator, day, impact, note, period, extra) {
+function fomcEvent_(indicator, day, impact, note, period, extra, confidence) {
   const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
   return makeEvent_({
     indicatorId: indicator.id,
@@ -112,7 +115,7 @@ function fomcEvent_(indicator, day, impact, note, period, extra) {
     country: indicator.country,
     category: indicator.category,
     source: 'fomc',
-    estimated: false,
+    confidence: confidence || 'estimated',
     period: period || null,
     note: note,
     url: indicator.url,
@@ -153,6 +156,7 @@ function pushClosures_(events, year, ctx) {
         country: holiday.country,
         category: holiday.category,
         source: 'market',
+        confidence: 'rule',
         allDay: true,
         note: table[key] + ' のため NYSE・ナスダックは終日休場。\n' + holiday.why,
       }));
@@ -173,6 +177,7 @@ function pushClosures_(events, year, ctx) {
         country: early.country,
         category: early.category,
         source: 'market',
+        confidence: 'rule',
         note: table[key] + ' のため 13:00 ET で取引終了。\n' + early.why,
       }));
     });
@@ -199,6 +204,7 @@ function pushExpiries_(events, year) {
       country: indicator.country,
       category: indicator.category,
       source: 'market',
+      confidence: 'rule',
       note: note,
     }));
   }
@@ -220,6 +226,7 @@ function pushRebalance_(events, year) {
     country: indicator.country,
     category: indicator.category,
     source: 'market',
+    confidence: 'rule',
     note: '引け後に構成銘柄の入替が発表される。翌週の第3金曜の引けで' +
           'パッシブ資金が執行され、対象銘柄は前後で大きく動く。\n' + indicator.why,
   }));

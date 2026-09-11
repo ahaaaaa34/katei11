@@ -27,6 +27,8 @@ function event(api, over = {}) {
     start,
     end: over.end || new Date(start.getTime() + 30 * 60000),
     impact: 90,
+    // 既定は「根拠あり」。未確定の振る舞いを見たいテストは明示して上書きする。
+    confidence: 'official',
   }, over));
 }
 
@@ -235,9 +237,9 @@ suite('指標カタログ', () => {
 // ---------------------------------------------------------------------------
 suite('イベントの合成', () => {
   test('上位の情報源が日時を決める', () => {
-    const guess = event(G, { source: 'rules', estimated: true,
+    const guess = event(G, { source: 'rules', confidence: 'estimated',
                              start: new Date(Date.UTC(2026, 8, 10, 13, 0)) });
-    const official = event(G, { source: 'fred', estimated: false });
+    const official = event(G, { source: 'fred', confidence: 'official' });
     const merged = G.mergeEvent_(guess, official);
     eq(merged.source, 'fred');
     eq(merged.start.toISOString(), '2026-09-10T12:30:00.000Z');
@@ -253,18 +255,29 @@ suite('イベントの合成', () => {
   });
 
   test('合成は順序に依らない', () => {
-    const a = event(G, { source: 'rules', estimated: true, note: 'なぜ効くか' });
+    const a = event(G, { source: 'rules', confidence: 'estimated', note: 'なぜ効くか' });
     const b = event(G, { source: 'investing', forecast: '1.0%' });
     eq(G.eventContentHash_(G.mergeEvent_(a, b)), G.eventContentHash_(G.mergeEvent_(b, a)));
   });
 
-  test('確定日は下位の情報源から来ても推定日に勝つ', () => {
-    const estimatedHigh = event(G, { source: 'investing', estimated: true,
-                                     start: new Date(Date.UTC(2026, 8, 10, 16, 0)) });
-    const confirmedLow = event(G, { source: 'rules', estimated: false });
-    const merged = G.mergeEvent_(estimatedHigh, confirmedLow);
-    eq(merged.estimated, false);
+  test('根拠の確かな日付が、情報源の優先順位より強い', () => {
+    // 優先順位は investing > rules だが、日付の根拠は rule > estimated。
+    const weakHigh = event(G, { source: 'investing', confidence: 'estimated',
+                                start: new Date(Date.UTC(2026, 8, 10, 16, 0)) });
+    const strongLow = event(G, { source: 'rules', confidence: 'rule' });
+    const merged = G.mergeEvent_(weakHigh, strongLow);
+    eq(merged.confidence, 'rule');
     eq(merged.start.toISOString(), '2026-09-10T12:30:00.000Z');
+  });
+
+  test('根拠は official > reported > rule > estimated の順で強い', () => {
+    eq(['official', 'reported', 'rule', 'estimated'].map(G.confidenceRank_),
+       [4, 3, 2, 1]);
+    const rule = event(G, { source: 'rules', confidence: 'rule' });
+    const official = event(G, { source: 'fred', confidence: 'official',
+                                start: new Date(Date.UTC(2026, 8, 10, 11, 0)) });
+    eq(G.mergeEvent_(rule, official).confidence, 'official');
+    eq(G.mergeEvent_(official, rule).confidence, 'official');
   });
 
   test('内容ハッシュは表示に使う値だけを見る', () => {
@@ -294,8 +307,8 @@ suite('情報源', () => {
   test('確定ルールと概算ルールを区別する', () => {
     const byId = {};
     G.providerRules_(ctx).forEach((e) => { byId[e.indicatorId] = e; });
-    eq(byId.us_ism_mfg.estimated, false, '第1営業日は確定');
-    eq(byId.us_cpi.estimated, true, '日付は概算');
+    eq(byId.us_ism_mfg.confidence, 'rule', '第1営業日は確定');
+    eq(byId.us_cpi.confidence, 'estimated', '日付は概算');
   });
 
   test('対象期間のラベルが入る', () => {
@@ -330,8 +343,10 @@ suite('情報源', () => {
     ok(rate.note.indexOf('ドットチャート') !== -1);
   });
 
-  test('FOMC 由来のイベントは推定ではない', () => {
-    G.providerFomc_(ctx).forEach((e) => eq(e.estimated, false, e.indicatorId));
+  test('手入力の FOMC 日程は、照合するまで「未確定」として扱う', () => {
+    // 人が書いた日程を「確定」と言い張らない。公式ページと照合して初めて
+    // official に上がる（この ctx では取得していないので estimated のまま）。
+    G.providerFomc_(ctx).forEach((e) => eq(e.confidence, 'estimated', e.indicatorId));
   });
 
   test('休場は終日イベントになる', () => {
@@ -372,7 +387,7 @@ suite('情報源', () => {
     const events = api.providerFred_(ctx);
     eq(events.map((e) => e.indicatorId), ['us_cpi']);
     eq(K(api.localDate_(events[0].start, 'America/New_York')), '2026-09-11');
-    eq(events[0].estimated, false, '公式日付なので推定ではない');
+    eq(events[0].confidence, 'official', '統計局の公表日程そのもの');
     eq(api.formatClock_(events[0].start, 'America/New_York').time, '08:30', '時刻はカタログから');
   });
 
@@ -434,7 +449,7 @@ suite('情報源', () => {
 suite('突き合わせと選抜', () => {
   test('同じ発表をひとつにまとめる', () => {
     const merged = G.mergeEvents_([
-      event(G, { source: 'rules', estimated: true }),
+      event(G, { source: 'rules', confidence: 'estimated' }),
       event(G, { source: 'fred' }),
       event(G, { source: 'investing', forecast: '0.3%' }),
     ], 'Asia/Tokyo');
@@ -444,9 +459,9 @@ suite('突き合わせと選抜', () => {
   });
 
   test('近くに確定日が出たら推定日を捨てる', () => {
-    const guess = event(G, { source: 'rules', estimated: true,
+    const guess = event(G, { source: 'rules', confidence: 'estimated',
                              start: G.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York') });
-    const confirmed = event(G, { source: 'fred',
+    const confirmed = event(G, { source: 'fred', confidence: 'official',
                                  start: G.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') });
     const kept = G.dropSupersededEstimates_([guess, confirmed], 'Asia/Tokyo');
     eq(kept.length, 1);
@@ -454,16 +469,16 @@ suite('突き合わせと選抜', () => {
   });
 
   test('月をまたぐ同一指標は別の発表として両方残す', () => {
-    const guess = event(G, { source: 'rules', estimated: true,
+    const guess = event(G, { source: 'rules', confidence: 'estimated',
                              start: G.zonedTime_(Y(2026, 10, 14), '08:30', 'America/New_York') });
-    const confirmed = event(G, { source: 'fred',
+    const confirmed = event(G, { source: 'fred', confidence: 'official',
                                  start: G.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') });
     eq(G.dropSupersededEstimates_([guess, confirmed], 'Asia/Tokyo').length, 2);
   });
 
   test('週次の指標は間引かれない', () => {
     const weekly = [3, 10, 17].map((day) => event(G, {
-      indicatorId: 'us_jobless_claims',
+      indicatorId: 'us_jobless_claims', confidence: 'rule',
       start: G.zonedTime_(Y(2026, 9, day), '08:30', 'America/New_York'),
     }));
     eq(G.dropSupersededEstimates_(weekly, 'Asia/Tokyo').length, 3);
@@ -617,7 +632,7 @@ suite('カレンダーへの反映', () => {
   test('発表日が動いたら移動になる（重複しない）', () => {
     const { api } = withCalendar();
     const oldEvent = event(api, {
-      start: api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York'), estimated: true });
+      start: api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York'), confidence: 'estimated' });
     const newEvent = event(api, {
       start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') });
     const plan = api.buildPlan_('cal-123', [newEvent], [stored(api, oldEvent)]);
@@ -695,11 +710,11 @@ suite('表示', () => {
   });
 
   test('推定日は件名で明示する', () => {
-    ok(G.renderTitle_(event(G, { estimated: true })).indexOf('予定日未確定') !== -1);
+    ok(G.renderTitle_(event(G, { confidence: 'estimated' })).indexOf('予定日未確定') !== -1);
   });
 
   test('結果が出れば「予定日未確定」は消える', () => {
-    const title = G.renderTitle_(event(G, { estimated: true, actual: '0.2%' }));
+    const title = G.renderTitle_(event(G, { confidence: 'estimated', actual: '0.2%' }));
     ok(title.indexOf('予定日未確定') === -1 && title.indexOf('0.2%') !== -1);
   });
 
@@ -719,7 +734,7 @@ suite('表示', () => {
   });
 
   test('推定日は説明文でも警告する', () => {
-    ok(G.renderDescription_(event(G, { estimated: true })).indexOf('推定') !== -1);
+    ok(G.renderDescription_(event(G, { confidence: 'estimated' })).indexOf('推定') !== -1);
   });
 
   test('星の数', () => {
@@ -1031,18 +1046,17 @@ suite('FOMC 日程の自動取得', () => {
     ok(/重複/.test(G.validateFomcYear_(meetings, 2027)));
   });
 
-  test('手入力が尽きた先の年だけを補う', () => {
+  test('手入力の無い年は公式ページから補う', () => {
     const api = serving(PAGE_HTML);
     const merged = api.allMeetings_('fomc');
-    const auto = merged.filter((m) => m.auto);
-    eq(auto.length, 8, '2027 年ぶんだけ入る');
-    ok(auto.every((m) => m.date.indexOf('2027') === 0));
-    eq(merged.filter((m) => !m.auto).length, 8, '手入力の 2026 年は 8 件のまま');
+    const added = merged.filter((m) => m.date.indexOf('2027') === 0);
+    eq(added.length, 8, '2027 年ぶんが入る');
+    ok(added.every((m) => m.confidence === 'official'));
   });
 
-  test('手入力がある年は絶対に上書きしない', () => {
-    // 公式ページ側にも 2026 年の（検証を通る）日程が載っている状況を作る。
-    // ガードが無ければ、手入力と違う日付が紛れ込む。
+  test('手入力と公式が食い違ったら、公式を採って知らせる', () => {
+    // カレンダーに載せるべきは公式の日程。人が書いた方は記憶違いや写し間違いが
+    // 入りうるので、検査を通った公式ページの記載を優先する。
     const api = serving(PAGE_HTML);
     const fetched = api.parseFomcCalendar_(PAGE_HTML)[2026];
     eq(api.validateFomcYear_(fetched, 2026), null, '取得側の 2026 年も検査を通ること');
@@ -1051,15 +1065,45 @@ suite('FOMC 日程の自動取得', () => {
        '取得側と手入力で日付が違うこと（違わないと試験にならない）');
 
     const merged = api.allMeetings_('fomc').filter((m) => m.date.indexOf('2026') === 0);
-    eq(merged.map((m) => m.date), curated, '手入力の日付がそのまま残ること');
-    ok(merged.every((m) => !m.auto), '2026 年に自動取得ぶんが混ざらないこと');
+    eq(merged.map((m) => m.date), fetched.map((m) => m.date), '公式の日程が入る');
+    ok(merged.every((m) => m.confidence === 'official'));
+
+    const mail = api._mail.find((m) => m.subject.indexOf('食い違') !== -1);
+    ok(mail, '食い違いを知らせるメールが出ること');
+    ok(mail.body.indexOf('2026-01-28') !== -1, '手入力側の日付が書いてあること');
+    ok(mail.body.indexOf('2026-01-21') !== -1, '公式側の日付が書いてあること');
   });
 
-  test('手入力より先の年だけが自動取得ぶんとして入る', () => {
+  test('手入力と公式が一致したら、手入力を「照合済み」に格上げする', () => {
+    const same = panel(2026, [
+      meetingRow('January', '27-28'), meetingRow('March', '17-18', true),
+      meetingRow('April', '28-29'), meetingRow('June', '16-17', true),
+      meetingRow('July', '28-29'), meetingRow('September', '15-16', true),
+      meetingRow('October', '27-28'), meetingRow('December', '8-9', true),
+    ]);
+    const api = serving(same);
+    const merged = api.allMeetings_('fomc').filter((m) => m.date.indexOf('2026') === 0);
+    eq(merged.map((m) => m.date), api.MEETINGS.fomc.meetings.map((m) => m.date));
+    ok(merged.every((m) => m.confidence === 'official'), '照合済みとして扱う');
+    eq(api._mail.filter((m) => m.subject.indexOf('食い違') !== -1), [],
+       '一致したときは黙っている');
+  });
+
+  test('同じ食い違いを何度も知らせない', () => {
     const api = serving(PAGE_HTML);
-    const auto = api.allMeetings_('fomc').filter((m) => m.auto);
-    ok(auto.length > 0);
-    ok(auto.every((m) => m.date > '2026-12-31'), '手入力の年をまたがないこと');
+    api.allMeetings_('fomc');
+    const first = api._mail.length;
+    api._store._fomcAuto = '';   // キャッシュを消して取り直させる
+    api.allMeetings_('fomc');
+    eq(api._mail.length, first, '2回目は送らない');
+  });
+
+  test('公式ページを取れなければ、手入力は「未確定」のまま', () => {
+    const api = loadGas({ UrlFetchApp: { fetch: () => { throw new Error('down'); } } });
+    const merged = api.allMeetings_('fomc');
+    eq(merged.length, 8);
+    ok(merged.every((m) => m.confidence === 'estimated'),
+       '照合できていないものを「確定」と言わない');
   });
 
   test('検査に落ちた年は取り込まない', () => {
@@ -1101,14 +1145,19 @@ suite('FOMC 日程の自動取得', () => {
     eq(calls, 1);
   });
 
-  test('手入力が十分先まであるなら取りに行かない', () => {
+  test('手入力が先まであっても、照合のために取りに行く', () => {
+    // 「足りているから見に行かない」だと、手入力が間違っていても永久に
+    // 気づけない。確からしさのために毎回（キャッシュ越しに）照合する。
     let calls = 0;
     const api = loadGas({
-      UrlFetchApp: { fetch: () => { calls++; throw new Error('呼ばれてはいけない'); } },
+      UrlFetchApp: {
+        fetch: () => { calls++; return { getResponseCode: () => 200,
+                                         getContentText: () => PAGE_HTML }; },
+      },
     });
     api.MEETINGS.fomc.meetings.push({ date: '2099-12-15', sep: true });
     api.allMeetings_('fomc');
-    eq(calls, 0);
+    eq(calls, 1);
   });
 
   test('自動取得を切れば手入力だけになる', () => {
@@ -1120,13 +1169,15 @@ suite('FOMC 日程の自動取得', () => {
   test('新しい年を取り込んだら貼り付け用のメールを1度だけ送る', () => {
     const api = serving(PAGE_HTML);
     api.allMeetings_('fomc');
-    eq(api._mail.length, 1);
-    ok(api._mail[0].subject.indexOf('2027') !== -1);
-    ok(api._mail[0].body.indexOf("{ date: '2027-01-27', sep: false },") !== -1,
+    const snippets = api._mail.filter((m) => m.subject.indexOf('自動取得しました') !== -1);
+    eq(snippets.length, 1);
+    ok(snippets[0].subject.indexOf('2027') !== -1);
+    ok(snippets[0].body.indexOf("{ date: '2027-01-27', sep: false },") !== -1,
        '貼り付けられる形になっていること');
     api._store[api.PROP_FOMC_AUTO] = '';   // キャッシュを消して再取得させる
     api.allMeetings_('fomc');
-    eq(api._mail.length, 1, '同じ年で二度は送らない');
+    eq(api._mail.filter((m) => m.subject.indexOf('自動取得しました') !== -1).length, 1,
+       '同じ年で二度は送らない');
   });
 
   test('自動取得ぶんの予定には出所が書かれる', () => {
@@ -1135,8 +1186,8 @@ suite('FOMC 日程の自動取得', () => {
     const rate = api.providerFomc_(ctx).find((e) => e.indicatorId === 'us_fomc_rate');
     eq(K(api.localDate_(rate.start, 'America/New_York')), '2027-03-17');
     eq(rate.extra.auto, true);
-    ok(rate.note.indexOf('自動取得') !== -1);
-    eq(rate.estimated, false, '公式ページ由来なので推定ではない');
+    ok(rate.note.indexOf('公式ページから取得') !== -1, rate.note.slice(-60));
+    eq(rate.confidence, 'official', '公式ページ由来なので確定');
   });
 
   test('自動取得で埋まっている間は「転記を促す」情報を出す', () => {
@@ -1185,7 +1236,7 @@ suite('診断コマンド', () => {
       },
     });
     const text = api.showStatus();
-    ok(/手入力 2026-12-09 まで \/ 自動取得 2027-/.test(text), text);
+    ok(/2027-\d{2}-\d{2} まで \/ 公式と照合済み \d+ 件中 \d+ 件/.test(text), text);
     ok(text.indexOf('fomcAutoFetch') === -1, '挙動スイッチを情報源として並べない');
   });
 });
@@ -2179,7 +2230,249 @@ suite('発表時刻の出どころ', () => {
     const cpi = events.find((e) => e.indicatorId === 'us_cpi');
     eq(api.formatClock_(cpi.start, 'America/New_York').time, '08:45', '実測の時刻');
     eq([cpi.forecast, cpi.previous, cpi.actual], ['0.3%', '0.4%', '0.2%']);
-    eq(cpi.estimated, false);
+    eq(cpi.confidence, 'official');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('日付の根拠を偽らない', () => {
+  function offline(api) {
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    return api;
+  }
+
+  test('根拠を書かなければ「概算」に倒れる', () => {
+    // 指定し忘れたときに「確定」と名乗ってしまうのが一番まずい。
+    const bare = G.makeEvent_({ indicatorId: 'x', title: 'x', impact: 50,
+                                start: new Date(1), end: new Date(2) });
+    eq(bare.confidence, 'estimated');
+  });
+
+  test('知らない根拠名も「概算」に倒れる', () => {
+    const bogus = G.makeEvent_({ indicatorId: 'x', title: 'x', impact: 50,
+                                 confidence: 'とても確か',
+                                 start: new Date(1), end: new Date(2) });
+    eq(bogus.confidence, 'estimated');
+  });
+
+  test('情報源ごとに名乗ってよい根拠が決まっている', () => {
+    const allowed = {
+      rules: ['rule', 'estimated'],
+      market: ['rule'],
+      fomc: ['official', 'rule', 'estimated'],
+      fred: ['official'],
+      earnings: ['official'],
+      investing: ['reported'],
+      digest: ['rule', 'estimated', 'official', 'reported'],
+    };
+    const api = offline(loadGas());
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 10, 31), timezone: 'Asia/Tokyo' };
+    api.collectEvents_(ctx).forEach((e) => {
+      ok(allowed[e.source] && allowed[e.source].indexOf(e.confidence) !== -1,
+         e.indicatorId + ': ' + e.source + ' が ' + e.confidence + ' を名乗っている');
+    });
+  });
+
+  test('通信なしのときに「公式」を名乗る予定は1件も無い', () => {
+    const api = offline(loadGas());
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 12, 31), timezone: 'Asia/Tokyo' };
+    const claimed = api.collectEvents_(ctx).filter((e) => e.confidence === 'official');
+    eq(claimed.map((e) => e.indicatorId), [],
+       '外部から何も取っていないのに公式を名乗ってはいけない');
+  });
+
+  test('件名の「予定日未確定」は概算のときだけ', () => {
+    ['official', 'reported', 'rule'].forEach((level) => {
+      ok(G.renderTitle_(event(G, { confidence: level })).indexOf('予定日未確定') === -1,
+         level);
+    });
+    ok(G.renderTitle_(event(G, { confidence: 'estimated' })).indexOf('予定日未確定') !== -1);
+  });
+
+  test('説明文には必ず根拠が書いてある', () => {
+    ['official', 'reported', 'rule', 'estimated'].forEach((level) => {
+      const text = G.renderDescription_(event(G, { confidence: level }));
+      ok(text.indexOf('日付の根拠 ' + G.CONFIDENCE_LABEL[level]) !== -1, level);
+    });
+  });
+
+  test('根拠が変われば内容ハッシュも変わる（既存の予定が更新される）', () => {
+    const a = G.eventContentHash_(event(G, { confidence: 'estimated' }));
+    const b = G.eventContentHash_(event(G, { confidence: 'official' }));
+    ok(a !== b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('データ品質の点検', () => {
+  function offline(api) {
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    return api;
+  }
+
+  test('根拠の内訳と、確かさを上げる手順を出す', () => {
+    const api = offline(loadGas({ Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() }));
+    const text = api.dataQuality();
+    ['日付の根拠', '概算（未確定）', 'FOMC 会合日程', '確かさを上げるには',
+     'FRED_API_KEY', '影響度スコアと解説文は、データではなく']
+      .forEach((needle) => ok(text.indexOf(needle) !== -1, needle));
+  });
+
+  test('未確定の指標を名前で挙げる', () => {
+    const api = offline(loadGas({ Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() }));
+    const text = api.dataQuality();
+    ok(text.indexOf('米 消費者物価指数 (CPI)') !== -1, 'CPI は概算なので挙がるはず');
+  });
+
+  test('FRED キーがあれば、その手順は「設定済み」になる', () => {
+    const api = offline(loadGas({
+      Calendar: fakeCalendar(), ScriptApp: fakeScriptApp(),
+      properties: { FRED_API_KEY: 'k' },
+    }));
+    const text = api.dataQuality();
+    ok(text.indexOf('✅ FRED キーは設定済み') !== -1);
+  });
+
+  test('FOMC を照合できていないことを隠さない', () => {
+    const api = offline(loadGas({ Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() }));
+    ok(api.dataQuality().indexOf('未照合') !== -1);
+  });
+
+  test('照合できていれば、そう出る', () => {
+    const { panel, meetingRow } = require('./fomc-fixture');
+    const same = panel(2026, [
+      meetingRow('January', '27-28'), meetingRow('March', '17-18', true),
+      meetingRow('April', '28-29'), meetingRow('June', '16-17', true),
+      meetingRow('July', '28-29'), meetingRow('September', '15-16', true),
+      meetingRow('October', '27-28'), meetingRow('December', '8-9', true),
+    ]);
+    const api = loadGas({
+      Calendar: fakeCalendar(), ScriptApp: fakeScriptApp(),
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                     getContentText: () => same }) },
+    });
+    api.CONFIG.providers.fred = false;
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    ok(api.dataQuality().indexOf('照合済み') !== -1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('発表規則の当たり具合を測る', () => {
+  function serving(rows) {
+    return loadGas({
+      Calendar: fakeCalendar(), ScriptApp: fakeScriptApp(),
+      properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: {
+        fetch: () => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ count: rows.length,
+                                                 release_dates: rows }),
+        }),
+      },
+    });
+  }
+
+  test('キーが無ければ、その旨を返して終わる', () => {
+    const api = loadGas({ Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() });
+    ok(api.verifyRules().indexOf('FRED のキーが必要') !== -1);
+  });
+
+  test('実際の発表日と規則のずれを出す', () => {
+    // 失業保険は毎週木曜。木曜の日付を並べればずれ 0 になるはず。
+    const rows = ['2026-08-06', '2026-08-13', '2026-08-20', '2026-08-27'].map((date) => ({
+      release_id: 1, release_name: 'Unemployment Insurance Weekly Claims', date,
+    }));
+    const text = serving(rows).verifyRules();
+    ok(text.indexOf('新規失業保険申請件数') !== -1, text);
+    ok(/0 日\s+100%/.test(text), 'ぴったり当たっていること: ' + text);
+  });
+
+  test('ずれている規則はずれとして出る', () => {
+    // CPI の規則は「12日ごろ」。20日に寄せた日付を並べればずれが出る。
+    const rows = ['2026-06-20', '2026-07-20', '2026-08-20'].map((date) => ({
+      release_id: 10, release_name: 'Consumer Price Index', date,
+    }));
+    const text = serving(rows).verifyRules();
+    ok(text.indexOf('消費者物価指数') !== -1, text);
+    ok(!/ 0 日\s+100%.*消費者物価/.test(text), 'ぴったりとは出ないこと');
+  });
+
+  test('突き合わせるものが無ければ、そう言う', () => {
+    const rows = [{ release_id: 99, release_name: 'Cheese Price Index',
+                    date: '2026-08-06' }];
+    ok(serving(rows).verifyRules().indexOf('突き合わせられる実績がありません') !== -1);
+  });
+
+  test('規則を持たない指標は測らない（FOMC など）', () => {
+    eq(G.ruleDistanceDays_(G.indicator_('us_fomc_rate'), Y(2026, 9, 16)), null);
+    eq(G.ruleDistanceDays_(G.indicator_('us_cpi'), Y(2026, 9, 14)), 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('FRED の対応付けの誤りを見つける', () => {
+  function serving(rows) {
+    return loadGas({
+      properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: {
+        fetch: () => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ count: rows.length,
+                                                 release_dates: rows }),
+        }),
+      },
+    });
+  }
+  const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+
+  test('ひとつの指標に複数の release が当たったら知らせる', () => {
+    const api = serving([
+      { release_id: 1, release_name: 'Producer Price Index', date: '2026-09-11' },
+      { release_id: 2, release_name: 'Producer Price Index by Commodity',
+        date: '2026-09-25' },
+    ]);
+    api.providerFred_(ctx);
+    const warnings = api.fredMatchWarnings_();
+    eq(warnings.length, 1);
+    ok(warnings[0].indexOf('us_ppi') !== -1, warnings[0]);
+    ok(warnings[0].indexOf('2 種類') !== -1, warnings[0]);
+  });
+
+  test('正しく1種類なら黙っている', () => {
+    const api = serving([
+      { release_id: 10, release_name: 'Consumer Price Index', date: '2026-09-11' },
+      { release_id: 10, release_name: 'Consumer Price Index', date: '2026-10-13' },
+    ]);
+    api.providerFred_(ctx);
+    eq(api.fredMatchWarnings_(), []);
+  });
+
+  test('疑いはデータ品質の点検にも出る', () => {
+    const api = loadGas({
+      Calendar: fakeCalendar(), ScriptApp: fakeScriptApp(),
+      properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: {
+        fetch: () => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ count: 2, release_dates: [
+            { release_id: 1, release_name: 'Producer Price Index', date: '2026-09-11' },
+            { release_id: 2, release_name: 'Producer Price Index by Commodity',
+              date: '2026-09-25' }] }),
+        }),
+      },
+    });
+    api.CONFIG.providers.earnings = false;
+    api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.fomcAutoFetch = false;
+    ok(api.dataQuality().indexOf('対応付けに疑いあり') !== -1);
   });
 });
 

@@ -11,6 +11,12 @@
 const FRED_API = 'https://api.stlouisfed.org/fred';
 const FRED_PAGE = 1000;
 
+// 対応付けの誤りを「規則からの距離」で検知しようとしたが、成立しなかった。
+// 週次規則からはどんな日付も最大4日、月次規則からも最大16日しか離れられず、
+// 誤対応を見分けられる幅が残らない（実測して確認した）。
+// 代わりに「ひとつの指標に複数の release 名が当たっていないか」で見る。
+// 規則の当たり具合そのものは measureRuleAccuracy_ で別途測る。
+
 function providerFred_(ctx) {
   const apiKey = prop_(PROP_FRED_KEY);
   if (!apiKey) {
@@ -24,12 +30,19 @@ function providerFred_(ctx) {
   if (rows === null) return [];
 
   const events = [];
+  // ひとつの指標に複数の release 名が当たったら、正規表現が緩すぎる合図。
+  // 関係ない発表日が「公式の日付」として混ざるので、見つけたら知らせる。
+  const matchedNames = {};
+  const suspicious = [];
+
   rows.forEach(function (row) {
     const name = row.release_name || '';
     if (!name) return;
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
+    matchedNames[indicator.id] = matchedNames[indicator.id] || {};
+    matchedNames[indicator.id][name] = true;
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
     if (!inDisplayWindow_(start, ctx)) return;
     events.push(makeEvent_({
@@ -41,15 +54,93 @@ function providerFred_(ctx) {
       country: indicator.country,
       category: indicator.category,
       source: 'fred',
-      estimated: false,
+      confidence: 'official',   // 統計局の公表日程そのもの
       period: periodLabel_(day, indicator.period_offset || 0),
       note: indicator.why,
       url: indicator.url,
       extra: { fredRelease: name },
     }));
   });
+  Object.keys(matchedNames).forEach(function (id) {
+    const names = Object.keys(matchedNames[id]);
+    if (names.length > 1) {
+      suspicious.push(id + ' ← ' + names.length + ' 種類の release に一致: '
+                      + names.join(' / '));
+    }
+  });
+  if (suspicious.length) {
+    log_('FRED の対応付けに疑いがあります:\n  ' + suspicious.join('\n  '));
+  }
+  FRED_LAST_WARNINGS_ = suspicious;
+
   log_('FRED: ' + rows.length + ' 件中 ' + events.length + ' 件が該当');
   return events;
+}
+
+/** 直近の取得で見つかった、対応付けの疑い（データ品質の点検で使う）。 */
+let FRED_LAST_WARNINGS_ = [];
+
+function fredMatchWarnings_() {
+  return FRED_LAST_WARNINGS_.slice();
+}
+
+/**
+ * その指標の発表規則が予想する日と、実際の日付との最小の隔たり（日）。
+ * 規則を持たない指標は判定できないので null を返す。
+ */
+function ruleDistanceDays_(indicator, day) {
+  if (!indicator.schedule || !indicator.schedule.type
+      || indicator.schedule.type === 'none') {
+    return null;
+  }
+  const predicted = ruleDates_(indicator.schedule,
+                               addDays_(day, -45), addDays_(day, 45));
+  if (!predicted.length) return null;
+  let best = Infinity;
+  predicted.forEach(function (date) {
+    best = Math.min(best, Math.abs(daysBetween_(date, day)));
+  });
+  return best;
+}
+
+/**
+ * 発表規則がどれだけ当たっているかを、FRED の実績で測る。
+ *
+ * 「第1営業日」「毎週木曜」といった規則は人が書いたものなので、
+ * 当たっているかどうかは測らないと分からない。過去の実際の発表日と
+ * 突き合わせて、指標ごとの的中率とずれを出す。
+ */
+function measureRuleAccuracy_(months) {
+  const apiKey = prop_(PROP_FRED_KEY);
+  if (!apiKey) return null;
+
+  const today = localDate_(new Date(), CONFIG.timezone);
+  const from = addDays_(today, -30 * (months || 12));
+  const rows = fredReleaseDates_(apiKey, from, today);
+  if (rows === null) return null;
+
+  const stats = {};
+  rows.forEach(function (row) {
+    const name = row.release_name || '';
+    const indicator = name ? matchFredRelease_(name) : null;
+    if (!indicator) return;
+    const gap = ruleDistanceDays_(indicator, parseDateKey_(row.date));
+    if (gap === null) return;
+    const entry = stats[indicator.id]
+      || (stats[indicator.id] = { id: indicator.id, name: indicator.name,
+                                  samples: 0, exact: 0, total: 0, worst: 0 });
+    entry.samples++;
+    entry.total += gap;
+    if (gap === 0) entry.exact++;
+    if (gap > entry.worst) entry.worst = gap;
+  });
+
+  return Object.keys(stats).map(function (id) {
+    const entry = stats[id];
+    entry.meanGap = Math.round((entry.total / entry.samples) * 10) / 10;
+    entry.exactRate = Math.round((entry.exact / entry.samples) * 100);
+    return entry;
+  }).sort(function (a, b) { return b.meanGap - a.meanGap; });
 }
 
 function fredReleaseDates_(apiKey, start, end) {
@@ -148,7 +239,7 @@ function earningsEvent_(day, row, tickers) {
     country: 'US',
     category: 'earnings',
     source: 'earnings',
-    estimated: row.time === 'time-not-supplied',
+    confidence: 'official',   // 取引所の決算カレンダー由来
     period: String(row.fiscalQuarterEnding || '').trim() || null,
     forecast: estimate ? 'EPS予想 ' + estimate : null,
     note: company + ' の四半期決算。\n' +
@@ -287,7 +378,7 @@ function investingRowsToEvents_(rows, ctx) {
       country: indicator.country,
       category: indicator.category,
       source: 'investing',
-      estimated: false,
+      confidence: 'reported',   // 一次情報ではなく第三者の集計
       exactTime: true,   // サイトが実際の発表時刻を持っている
       period: investingPeriod_(row.name),
       actual: row.actual,

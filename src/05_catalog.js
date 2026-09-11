@@ -78,6 +78,35 @@ function periodLabel_(date, offset) {
 
 const TIERS = ['S', 'A', 'B', 'C'];
 
+/**
+ * その予定の「日付の根拠」。カレンダーに嘘を書かないための型。
+ *
+ *   official  一次情報源が公表した日程そのもの
+ *             （FRED の発表日、Fed 公式ページの会合日程、Nasdaq の決算日）
+ *   reported  第三者が集計したもの（Investing.com）。実務上は正確だが一次ではない
+ *   rule      確定的な発表規則からの算出
+ *             （ISM＝第1営業日、失業保険＝毎週木曜、取引所の休場ルールなど）
+ *   estimated 概算、または人が書いたまま公式と照合していないもの
+ *
+ * 数字が大きいほど確か。合成のときはこの順で日付を採る。
+ */
+const CONFIDENCE_RANK = { official: 4, reported: 3, rule: 2, estimated: 1 };
+const CONFIDENCE_LABEL = {
+  official: '公式発表の日程',
+  reported: '集計サイトの日程',
+  rule: '発表規則から算出',
+  estimated: '概算（未確定）',
+};
+
+function confidenceRank_(name) {
+  return CONFIDENCE_RANK[name] || 0;
+}
+
+/** 件名に「未確定」と出すのはこれだけ。 */
+function isEstimated_(event) {
+  return event.confidence === 'estimated';
+}
+
 /** 情報源の優先順位。数字が大きいほど、衝突したときに勝つ。 */
 const SOURCE_PRIORITY = {
   rules: 10,
@@ -110,7 +139,8 @@ function makeEvent_(fields) {
     category: fields.category || 'other',
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
-    estimated: !!fields.estimated,
+    // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
+    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
     // その情報源が「実際の発表時刻」を持っているか。
     // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
     // 本物の時刻を持つ情報源が現れたらそちらに譲る。
@@ -162,7 +192,7 @@ function eventCalendarId_(event, timezone) {
 function eventContentHash_(event) {
   const payload = [
     event.title, event.start.toISOString(), event.end.toISOString(), event.impact,
-    event.allDay, event.estimated, event.period, event.actual, event.forecast,
+    event.allDay, event.confidence, event.period, event.actual, event.forecast,
     event.previous, event.note, event.url, event.source,
   ].join('|');
   return sha1Hex_(payload).slice(0, 16);
@@ -182,9 +212,10 @@ function mergeEvent_(a, b) {
     if (!merged[name] && low[name]) merged[name] = low[name];
   });
   if (!merged.note && low.note) merged.note = low.note;
-  // 確定日は、どの情報源から来たものでも推定日に勝つ。
-  if (merged.estimated && !low.estimated) {
-    merged.estimated = false;
+  // 日付は、根拠の確かな方を採る。情報源の優先順位とは別の軸で決める。
+  // 例: ルール計算(rule)より FRED の公式日(official)が勝つ。
+  if (confidenceRank_(low.confidence) > confidenceRank_(merged.confidence)) {
+    merged.confidence = low.confidence;
     merged.start = low.start;
     merged.end = low.end;
   }

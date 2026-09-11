@@ -1477,6 +1477,35 @@ function periodLabel_(date, offset) {
 
 const TIERS = ['S', 'A', 'B', 'C'];
 
+/**
+ * その予定の「日付の根拠」。カレンダーに嘘を書かないための型。
+ *
+ *   official  一次情報源が公表した日程そのもの
+ *             （FRED の発表日、Fed 公式ページの会合日程、Nasdaq の決算日）
+ *   reported  第三者が集計したもの（Investing.com）。実務上は正確だが一次ではない
+ *   rule      確定的な発表規則からの算出
+ *             （ISM＝第1営業日、失業保険＝毎週木曜、取引所の休場ルールなど）
+ *   estimated 概算、または人が書いたまま公式と照合していないもの
+ *
+ * 数字が大きいほど確か。合成のときはこの順で日付を採る。
+ */
+const CONFIDENCE_RANK = { official: 4, reported: 3, rule: 2, estimated: 1 };
+const CONFIDENCE_LABEL = {
+  official: '公式発表の日程',
+  reported: '集計サイトの日程',
+  rule: '発表規則から算出',
+  estimated: '概算（未確定）',
+};
+
+function confidenceRank_(name) {
+  return CONFIDENCE_RANK[name] || 0;
+}
+
+/** 件名に「未確定」と出すのはこれだけ。 */
+function isEstimated_(event) {
+  return event.confidence === 'estimated';
+}
+
 /** 情報源の優先順位。数字が大きいほど、衝突したときに勝つ。 */
 const SOURCE_PRIORITY = {
   rules: 10,
@@ -1509,7 +1538,8 @@ function makeEvent_(fields) {
     category: fields.category || 'other',
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
-    estimated: !!fields.estimated,
+    // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
+    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
     // その情報源が「実際の発表時刻」を持っているか。
     // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
     // 本物の時刻を持つ情報源が現れたらそちらに譲る。
@@ -1561,7 +1591,7 @@ function eventCalendarId_(event, timezone) {
 function eventContentHash_(event) {
   const payload = [
     event.title, event.start.toISOString(), event.end.toISOString(), event.impact,
-    event.allDay, event.estimated, event.period, event.actual, event.forecast,
+    event.allDay, event.confidence, event.period, event.actual, event.forecast,
     event.previous, event.note, event.url, event.source,
   ].join('|');
   return sha1Hex_(payload).slice(0, 16);
@@ -1581,9 +1611,10 @@ function mergeEvent_(a, b) {
     if (!merged[name] && low[name]) merged[name] = low[name];
   });
   if (!merged.note && low.note) merged.note = low.note;
-  // 確定日は、どの情報源から来たものでも推定日に勝つ。
-  if (merged.estimated && !low.estimated) {
-    merged.estimated = false;
+  // 日付は、根拠の確かな方を採る。情報源の優先順位とは別の軸で決める。
+  // 例: ルール計算(rule)より FRED の公式日(official)が勝つ。
+  if (confidenceRank_(low.confidence) > confidenceRank_(merged.confidence)) {
+    merged.confidence = low.confidence;
     merged.start = low.start;
     merged.end = low.end;
   }
@@ -1635,7 +1666,7 @@ function providerRules_(ctx) {
         country: indicator.country,
         category: indicator.category,
         source: 'rules',
-        estimated: !ruleIsExact_(indicator),
+        confidence: ruleIsExact_(indicator) ? 'rule' : 'estimated',
         period: periodLabel_(date, indicator.period_offset || 0),
         note: indicator.why,
         url: indicator.url,
@@ -1651,8 +1682,7 @@ function providerRules_(ctx) {
 
 const MINUTES_LAG_DAYS = 21;      // 議事要旨は会合2日目の3週間後
 const AUTO_ORIGIN_NOTE =
-  '\n\n※ この会合日程は Fed の公式ページから自動取得したものです'
-  + '（手入力の日程が尽きた先の年）。';
+  '\n\n※ この会合日程は Fed の公式ページから取得したものです。';
 const BEIGE_BOOK_LEAD_DAYS = 14;  // ベージュブックは会合の2週間前
 
 function providerFomc_(ctx) {
@@ -1669,6 +1699,10 @@ function providerFomc_(ctx) {
       const sep = !!meeting.sep;
       // 自動取得ぶんは、どこから来た日程かを説明文に残す。
       const origin = meeting.auto ? AUTO_ORIGIN_NOTE : '';
+      // 会合日そのものの確からしさ。議事要旨などの派生は、そこから
+      // 「3週間後」という慣例で導いているので rule 止まりにする。
+      const base = meeting.confidence || 'estimated';
+      const derived = confidenceRank_(base) > confidenceRank_('rule') ? 'rule' : base;
 
       const rate = indicator_(banks[bank].rate);
       if (!rate) return;
@@ -1678,7 +1712,7 @@ function providerFomc_(ctx) {
                 '利下げ回数の織り込みが一気に書き換わるため、通常会合より値動きが大きい。';
       }
       events.push(fomcEvent_(rate, day, rate.impact, note + origin, null,
-                             { sep: sep, bank: bank, auto: !!meeting.auto }));
+                             { sep: sep, bank: bank, auto: !!meeting.auto }, base));
 
       const presser = banks[bank].presser ? indicator_(banks[bank].presser) : null;
       if (presser) {
@@ -1693,12 +1727,12 @@ function providerFomc_(ctx) {
           events.push(fomcEvent_(minutes, addDays_(day, MINUTES_LAG_DAYS), minutes.impact,
                                  minutes.why + origin,
                                  day.getUTCFullYear() + '年' + (day.getUTCMonth() + 1) + '月' +
-                                 day.getUTCDate() + '日会合分'));
+                                 day.getUTCDate() + '日会合分', null, derived));
         }
         const beige = indicator_('us_beige_book');
         if (beige) {
           events.push(fomcEvent_(beige, addDays_(day, -BEIGE_BOOK_LEAD_DAYS), beige.impact,
-                                 beige.why + origin));
+                                 beige.why + origin, null, null, derived));
         }
       }
     });
@@ -1707,7 +1741,7 @@ function providerFomc_(ctx) {
   return events.filter(function (event) { return inDisplayWindow_(event.start, ctx); });
 }
 
-function fomcEvent_(indicator, day, impact, note, period, extra) {
+function fomcEvent_(indicator, day, impact, note, period, extra, confidence) {
   const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
   return makeEvent_({
     indicatorId: indicator.id,
@@ -1718,7 +1752,7 @@ function fomcEvent_(indicator, day, impact, note, period, extra) {
     country: indicator.country,
     category: indicator.category,
     source: 'fomc',
-    estimated: false,
+    confidence: confidence || 'estimated',
     period: period || null,
     note: note,
     url: indicator.url,
@@ -1759,6 +1793,7 @@ function pushClosures_(events, year, ctx) {
         country: holiday.country,
         category: holiday.category,
         source: 'market',
+        confidence: 'rule',
         allDay: true,
         note: table[key] + ' のため NYSE・ナスダックは終日休場。\n' + holiday.why,
       }));
@@ -1779,6 +1814,7 @@ function pushClosures_(events, year, ctx) {
         country: early.country,
         category: early.category,
         source: 'market',
+        confidence: 'rule',
         note: table[key] + ' のため 13:00 ET で取引終了。\n' + early.why,
       }));
     });
@@ -1805,6 +1841,7 @@ function pushExpiries_(events, year) {
       country: indicator.country,
       category: indicator.category,
       source: 'market',
+      confidence: 'rule',
       note: note,
     }));
   }
@@ -1826,6 +1863,7 @@ function pushRebalance_(events, year) {
     country: indicator.country,
     category: indicator.category,
     source: 'market',
+    confidence: 'rule',
     note: '引け後に構成銘柄の入替が発表される。翌週の第3金曜の引けで' +
           'パッシブ資金が執行され、対象銘柄は前後で大きく動く。\n' + indicator.why,
   }));
@@ -1848,6 +1886,12 @@ function pushRebalance_(events, year) {
 const FRED_API = 'https://api.stlouisfed.org/fred';
 const FRED_PAGE = 1000;
 
+// 対応付けの誤りを「規則からの距離」で検知しようとしたが、成立しなかった。
+// 週次規則からはどんな日付も最大4日、月次規則からも最大16日しか離れられず、
+// 誤対応を見分けられる幅が残らない（実測して確認した）。
+// 代わりに「ひとつの指標に複数の release 名が当たっていないか」で見る。
+// 規則の当たり具合そのものは measureRuleAccuracy_ で別途測る。
+
 function providerFred_(ctx) {
   const apiKey = prop_(PROP_FRED_KEY);
   if (!apiKey) {
@@ -1861,12 +1905,19 @@ function providerFred_(ctx) {
   if (rows === null) return [];
 
   const events = [];
+  // ひとつの指標に複数の release 名が当たったら、正規表現が緩すぎる合図。
+  // 関係ない発表日が「公式の日付」として混ざるので、見つけたら知らせる。
+  const matchedNames = {};
+  const suspicious = [];
+
   rows.forEach(function (row) {
     const name = row.release_name || '';
     if (!name) return;
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
+    matchedNames[indicator.id] = matchedNames[indicator.id] || {};
+    matchedNames[indicator.id][name] = true;
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
     if (!inDisplayWindow_(start, ctx)) return;
     events.push(makeEvent_({
@@ -1878,15 +1929,93 @@ function providerFred_(ctx) {
       country: indicator.country,
       category: indicator.category,
       source: 'fred',
-      estimated: false,
+      confidence: 'official',   // 統計局の公表日程そのもの
       period: periodLabel_(day, indicator.period_offset || 0),
       note: indicator.why,
       url: indicator.url,
       extra: { fredRelease: name },
     }));
   });
+  Object.keys(matchedNames).forEach(function (id) {
+    const names = Object.keys(matchedNames[id]);
+    if (names.length > 1) {
+      suspicious.push(id + ' ← ' + names.length + ' 種類の release に一致: '
+                      + names.join(' / '));
+    }
+  });
+  if (suspicious.length) {
+    log_('FRED の対応付けに疑いがあります:\n  ' + suspicious.join('\n  '));
+  }
+  FRED_LAST_WARNINGS_ = suspicious;
+
   log_('FRED: ' + rows.length + ' 件中 ' + events.length + ' 件が該当');
   return events;
+}
+
+/** 直近の取得で見つかった、対応付けの疑い（データ品質の点検で使う）。 */
+let FRED_LAST_WARNINGS_ = [];
+
+function fredMatchWarnings_() {
+  return FRED_LAST_WARNINGS_.slice();
+}
+
+/**
+ * その指標の発表規則が予想する日と、実際の日付との最小の隔たり（日）。
+ * 規則を持たない指標は判定できないので null を返す。
+ */
+function ruleDistanceDays_(indicator, day) {
+  if (!indicator.schedule || !indicator.schedule.type
+      || indicator.schedule.type === 'none') {
+    return null;
+  }
+  const predicted = ruleDates_(indicator.schedule,
+                               addDays_(day, -45), addDays_(day, 45));
+  if (!predicted.length) return null;
+  let best = Infinity;
+  predicted.forEach(function (date) {
+    best = Math.min(best, Math.abs(daysBetween_(date, day)));
+  });
+  return best;
+}
+
+/**
+ * 発表規則がどれだけ当たっているかを、FRED の実績で測る。
+ *
+ * 「第1営業日」「毎週木曜」といった規則は人が書いたものなので、
+ * 当たっているかどうかは測らないと分からない。過去の実際の発表日と
+ * 突き合わせて、指標ごとの的中率とずれを出す。
+ */
+function measureRuleAccuracy_(months) {
+  const apiKey = prop_(PROP_FRED_KEY);
+  if (!apiKey) return null;
+
+  const today = localDate_(new Date(), CONFIG.timezone);
+  const from = addDays_(today, -30 * (months || 12));
+  const rows = fredReleaseDates_(apiKey, from, today);
+  if (rows === null) return null;
+
+  const stats = {};
+  rows.forEach(function (row) {
+    const name = row.release_name || '';
+    const indicator = name ? matchFredRelease_(name) : null;
+    if (!indicator) return;
+    const gap = ruleDistanceDays_(indicator, parseDateKey_(row.date));
+    if (gap === null) return;
+    const entry = stats[indicator.id]
+      || (stats[indicator.id] = { id: indicator.id, name: indicator.name,
+                                  samples: 0, exact: 0, total: 0, worst: 0 });
+    entry.samples++;
+    entry.total += gap;
+    if (gap === 0) entry.exact++;
+    if (gap > entry.worst) entry.worst = gap;
+  });
+
+  return Object.keys(stats).map(function (id) {
+    const entry = stats[id];
+    entry.meanGap = Math.round((entry.total / entry.samples) * 10) / 10;
+    entry.exactRate = Math.round((entry.exact / entry.samples) * 100);
+    return entry;
+  }).sort(function (a, b) { return b.meanGap - a.meanGap; });
 }
 
 function fredReleaseDates_(apiKey, start, end) {
@@ -1985,7 +2114,7 @@ function earningsEvent_(day, row, tickers) {
     country: 'US',
     category: 'earnings',
     source: 'earnings',
-    estimated: row.time === 'time-not-supplied',
+    confidence: 'official',   // 取引所の決算カレンダー由来
     period: String(row.fiscalQuarterEnding || '').trim() || null,
     forecast: estimate ? 'EPS予想 ' + estimate : null,
     note: company + ' の四半期決算。\n' +
@@ -2124,7 +2253,7 @@ function investingRowsToEvents_(rows, ctx) {
       country: indicator.country,
       category: indicator.category,
       source: 'investing',
-      estimated: false,
+      confidence: 'reported',   // 一次情報ではなく第三者の集計
       exactTime: true,   // サイトが実際の発表時刻を持っている
       period: investingPeriod_(row.name),
       actual: row.actual,
@@ -2176,6 +2305,7 @@ function investingPeriod_(name) {
 const FOMC_CALENDAR_URL = 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm';
 const PROP_FOMC_AUTO = '_fomcAuto';
 const PROP_FOMC_AUTO_MAILED = '_fomcAutoMailed';
+const PROP_FOMC_CONFLICT_MAILED = '_fomcConflictMailed';
 
 /** 取得結果はこの日数だけ使い回す（毎回取りに行く必要はない）。 */
 const FOMC_AUTO_TTL_DAYS = 7;
@@ -2183,8 +2313,6 @@ const FOMC_AUTO_TTL_DAYS = 7;
 /** 何も採用できなかったときのキャッシュ期間。復旧に早く追随するため短くする。 */
 const FOMC_AUTO_EMPTY_TTL_DAYS = 1;
 
-/** 手入力の日程がこの日数より先まであるなら、そもそも取りに行かない。 */
-const FOMC_AUTO_TRIGGER_DAYS = 180;
 
 /** 1回の実行のあいだは取得結果を使い回す（失敗も含めて1回で済ませる）。 */
 let FOMC_AUTO_MEMO_ = null;
@@ -2208,25 +2336,103 @@ const SEP_MONTHS = [3, 6, 9, 12];
 function allMeetings_(bank) {
   const section = MEETINGS[bank] || {};
   const curated = (section.meetings || []).map(function (entry) {
-    return { date: entry.date, sep: !!entry.sep, auto: false };
+    return {
+      date: entry.date,
+      sep: !!entry.sep,
+      auto: false,
+      // 人が書いたまま。公式と照合するまでは「未確定」として扱う。
+      confidence: 'estimated',
+    };
   });
   if (bank !== 'fomc' || !CONFIG.providers.fomcAutoFetch) return curated;
+  return reconcileFomc_(curated, autoFomcMeetings_(curated));
+}
 
-  let maxYear = 0;
+/**
+ * 手入力の日程を、公式ページから取った日程と突き合わせる。
+ *
+ *  一致した年   → その年は「公式で確認済み」に格上げする
+ *  食い違った年 → **公式の方を採る**。手入力は人の記憶や写し間違いが入りうる
+ *                 のに対し、こちらは検査を通った公式ページの記載だから。
+ *                 そのうえで、どこがどう違うかをメールで知らせる。
+ *  取れなかった年 → 手入力のまま（未確定の扱いを維持する）
+ */
+function reconcileFomc_(curated, auto) {
+  const byYear = {};
   curated.forEach(function (entry) {
     const year = parseDateKey_(entry.date).getUTCFullYear();
-    if (year > maxYear) maxYear = year;
+    (byYear[year] = byYear[year] || []).push(entry);
   });
 
-  const auto = autoFomcMeetings_(curated);
-  const merged = curated.slice();
-  Object.keys(auto).forEach(function (year) {
-    if (Number(year) <= maxYear) return;   // 手入力がある年は触らない
-    auto[year].forEach(function (entry) {
-      merged.push({ date: entry.date, sep: entry.sep, auto: true });
+  const out = [];
+  const conflicts = [];
+
+  Object.keys(byYear).forEach(function (year) {
+    const mine = byYear[year];
+    const official = auto[year];
+    if (!official || !official.length) {
+      out.push.apply(out, mine);
+      return;
+    }
+    const mineDates = mine.map(function (m) { return m.date; }).sort().join(',');
+    const officialDates = official.map(function (m) { return m.date; }).sort().join(',');
+
+    if (mineDates === officialDates) {
+      mine.forEach(function (entry) {
+        out.push({ date: entry.date, sep: entry.sep, auto: false, confidence: 'official' });
+      });
+      return;
+    }
+    conflicts.push({ year: year, mine: mineDates, official: officialDates });
+    official.forEach(function (entry) {
+      out.push({ date: entry.date, sep: entry.sep, auto: true, confidence: 'official' });
     });
   });
-  return merged.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+
+  // 手入力がまったく無い年は、そのまま自動取得ぶんを使う。
+  Object.keys(auto).forEach(function (year) {
+    if (byYear[year]) return;
+    auto[year].forEach(function (entry) {
+      out.push({ date: entry.date, sep: entry.sep, auto: true, confidence: 'official' });
+    });
+  });
+
+  notifyFomcConflicts_(conflicts);
+  return out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+}
+
+/** 手入力と公式が食い違ったら、放置せずに知らせる（同じ内容は繰り返さない）。 */
+function notifyFomcConflicts_(conflicts) {
+  if (!conflicts.length) return false;
+  const signature = conflicts.map(function (c) { return c.year + ':' + c.official; }).join('|');
+  if (prop_(PROP_FOMC_CONFLICT_MAILED) === signature) return false;
+
+  const body = [
+    'FOMC の会合日程が、手入力（02_meetings.js）と Fed の公式ページで食い違いました。',
+    'カレンダーには**公式ページの日程**を入れています。',
+    '',
+  ].concat(conflicts.map(function (c) {
+    return [
+      c.year + ' 年',
+      '  手入力: ' + c.mine,
+      '  公式  : ' + c.official,
+    ].join('\n');
+  })).concat([
+    '',
+    '02_meetings.js を公式に合わせて直してください。',
+    '直すまでは毎回この照合が走り、公式の日程が使われます。',
+    (MEETINGS.fomc.verify_url || ''),
+  ]).join('\n');
+
+  log_(body);
+  sendMail_('[経済指標カレンダー] FOMC 日程が公式と食い違っています', body);
+  postWebhook_(body);
+  try {
+    props_().setProperty(PROP_FOMC_CONFLICT_MAILED, signature);
+  } catch (err) {
+    log_('通知状態を保存できませんでした: ' + err);
+  }
+  return true;
 }
 
 /** 自動取得ぶんの会合日程（年 → 配列）。キャッシュ付き。 */
@@ -2243,7 +2449,6 @@ function fetchAutoFomcMeetings_(curated) {
     ? FOMC_AUTO_EMPTY_TTL_DAYS : FOMC_AUTO_TTL_DAYS;
   const fresh = cached && (Date.now() - cached.fetchedAt) < ttlDays * 86400000;
   if (fresh) return cached.years;
-  if (!needsAutoFomc_(curated)) return cached ? cached.years : {};
 
   const html = fetchText_(FOMC_CALENDAR_URL);
   if (html === null) {
@@ -2273,15 +2478,6 @@ function fetchAutoFomcMeetings_(curated) {
   maybeMailFomcSnippet_(accepted, curated);
   log_('FOMC 自動取得: ' + Object.keys(accepted).join(', ') + ' 年ぶんを採用');
   return accepted;
-}
-
-/** 手入力がまだ十分先まであるなら、取りに行かない。 */
-function needsAutoFomc_(curated) {
-  if (!curated.length) return true;
-  let last = '';
-  curated.forEach(function (entry) { if (entry.date > last) last = entry.date; });
-  const horizon = addDays_(localDate_(new Date(), CONFIG.timezone), FOMC_AUTO_TRIGGER_DAYS);
-  return parseDateKey_(last).getTime() < horizon.getTime();
 }
 
 function readAutoCache_() {
@@ -2568,13 +2764,13 @@ function mergeEvents_(events, timezone) {
 function dropSupersededEstimates_(events, timezone) {
   const confirmed = {};
   events.forEach(function (event) {
-    if (event.estimated) return;
+    if (isEstimated_(event)) return;
     const key = event.indicatorId;
     (confirmed[key] = confirmed[key] || []).push(localDate_(event.start, timezone));
   });
 
   return events.filter(function (event) {
-    if (!event.estimated) return true;
+    if (!isEstimated_(event)) return true;
     const known = confirmed[event.indicatorId] || [];
     const day = localDate_(event.start, timezone);
     for (let i = 0; i < known.length; i++) {
@@ -2636,7 +2832,7 @@ function renderTitle_(event) {
   parts.push(event.title);
   if (CONFIG.display.showScore) parts.push('[' + event.impact + ']');
   if (event.actual) parts.push('→ ' + event.actual);
-  else if (event.estimated) parts.push('(予定日未確定)');
+  else if (isEstimated_(event)) parts.push('(予定日未確定)');
   return parts.join(' ');
 }
 
@@ -2672,6 +2868,9 @@ function renderDescription_(event) {
                + '  (現地 ' + eastern.time + ' ET)');
   }
   if (event.period) lines.push('対象期間 ' + event.period);
+  // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
+  // どこまで信じてよいかを判断できるようにするため。
+  lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
     .filter(function (pair) { return !!pair[1]; });
@@ -2687,7 +2886,7 @@ function renderDescription_(event) {
   }
 
   lines.push('');
-  if (event.estimated) {
+  if (isEstimated_(event)) {
     lines.push('⚠️ この日付は過去の慣例から推定したものです。'
                + '公式発表で前後する可能性があります。');
   }
@@ -2704,7 +2903,7 @@ function renderLine_(event) {
   const when = local.short + '(' + local.weekday + ')'
              + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
   const flag = FLAGS[event.country] || '  ';
-  const mark = event.estimated ? '~' : ' ';
+  const mark = isEstimated_(event) ? '~' : ' ';
   let figures = '';
   if (event.actual) {
     figures = '  結果 ' + event.actual + (event.forecast ? ' / 予想 ' + event.forecast : '');
@@ -3289,6 +3488,8 @@ function sendMail_(subject, body) {
  *   showStatus()        設定・情報源・メンテナンス状況の確認
  *   removeAllEvents()   このツールが作った予定を削除する
  *   uninstall()         自動実行を止める（予定は残ります）
+ *   dataQuality()       いま入っているデータがどれだけ確かかを点検する
+ *   verifyRules()       発表規則の当たり具合を、FRED の実績で測る
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   runTests()          日付計算などの自己テスト
  */
@@ -3602,13 +3803,13 @@ function showStatus() {
 function meetingCoverage_() {
   const meetings = allMeetings_('fomc');
   if (!meetings.length) return '未登録';
-  let manual = '', auto = '';
+  let last = '';
+  let verified = 0;
   meetings.forEach(function (meeting) {
-    if (meeting.auto) { if (meeting.date > auto) auto = meeting.date; }
-    else if (meeting.date > manual) manual = meeting.date;
+    if (meeting.date > last) last = meeting.date;
+    if (meeting.confidence === 'official') verified++;
   });
-  return '手入力 ' + (manual || 'なし') + ' まで'
-       + (auto ? ' / 自動取得 ' + auto + ' まで' : '');
+  return last + ' まで / 公式と照合済み ' + verified + ' 件中 ' + meetings.length + ' 件';
 }
 
 /**
@@ -3649,6 +3850,148 @@ function checkFomcAutoFetch() {
   lines.push('* 印は経済見通し(SEP)が同時公表される回。');
   lines.push('現在の状態: ' + meetingCoverage_());
   lines.push('手入力（02_meetings.js）がある年は、取得結果があっても使いません。');
+
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+/**
+ * いまカレンダーに入る予定が、どれだけ確かな根拠に基づいているかを出す。
+ *
+ * 「正しいデータが入っているか」を自分で確かめられるようにするための関数。
+ * 数えるだけでなく、確かにするために何をすればよいかまで書く。
+ */
+function dataQuality() {
+  validateConfig_();
+  const ctx = syncWindow_();
+  const events = collectEvents_(ctx);
+
+  const counts = { official: 0, reported: 0, rule: 0, estimated: 0 };
+  const estimatedBy = {};
+  events.forEach(function (event) {
+    counts[event.confidence] = (counts[event.confidence] || 0) + 1;
+    if (isEstimated_(event)) {
+      estimatedBy[event.indicatorId] = (estimatedBy[event.indicatorId] || 0) + 1;
+    }
+  });
+
+  const lines = [];
+  lines.push('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
+             + ' / ' + events.length + ' 件');
+  lines.push('');
+  lines.push('■ 日付の根拠');
+  ['official', 'reported', 'rule', 'estimated'].forEach(function (key) {
+    const bar = new Array(Math.round((counts[key] || 0) / 2) + 1).join('■');
+    lines.push('   ' + (CONFIDENCE_LABEL[key] + '          ').slice(0, 10)
+               + String(counts[key] || 0).padStart(3) + ' 件 ' + bar);
+  });
+
+  const estimatedIds = Object.keys(estimatedBy);
+  if (estimatedIds.length) {
+    lines.push('');
+    lines.push('■ 日付が未確定のもの（件名に「(予定日未確定)」と出ます）');
+    estimatedIds.sort().forEach(function (id) {
+      const indicator = indicator_(id);
+      lines.push('   ' + (indicator ? indicator.name : id)
+                 + ' × ' + estimatedBy[id] + '回');
+    });
+  }
+
+  lines.push('');
+  lines.push('■ FOMC 会合日程');
+  lines.push('   ' + fomcVerificationStatus_());
+
+  const warnings = fredMatchWarnings_();
+  if (warnings.length) {
+    lines.push('');
+    lines.push('■ FRED の対応付けに疑いあり');
+    warnings.forEach(function (text) { lines.push('   ' + text); });
+  }
+
+  lines.push('');
+  lines.push('■ 確かさを上げるには');
+  if (!prop_(PROP_FRED_KEY)) {
+    lines.push('   1. FRED の無料キーを取得して、スクリプト プロパティ '
+               + PROP_FRED_KEY + ' に入れる');
+    lines.push('      → 主要10指標の発表日が公式の確定値になります');
+    lines.push('      https://fred.stlouisfed.org/docs/api/api_key.html');
+  } else {
+    lines.push('   ✅ FRED キーは設定済み');
+  }
+  if (!CONFIG.providers.investing) {
+    lines.push('   2. 00_config.js の providers.investing を true にする');
+    lines.push('      → 発表時刻が実測値になり、予想値・前回値・結果値が入ります');
+  } else {
+    lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
+  }
+  lines.push('   3. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+
+  lines.push('');
+  lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');
+
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+function fomcVerificationStatus_() {
+  const meetings = allMeetings_('fomc');
+  if (!meetings.length) return '未登録';
+  const byConfidence = {};
+  meetings.forEach(function (meeting) {
+    byConfidence[meeting.confidence] = (byConfidence[meeting.confidence] || 0) + 1;
+  });
+  if (byConfidence.official === meetings.length) {
+    return '公式ページと照合済み（' + meetings.length + ' 回ぶん）';
+  }
+  if (!byConfidence.official) {
+    return '未照合（' + meetings.length + ' 回ぶん）'
+         + ' — 公式ページを取得できていません。checkFomcAutoFetch() で確認してください';
+  }
+  return '一部だけ照合済み（照合 ' + byConfidence.official + ' / 未照合 '
+       + (meetings.length - byConfidence.official) + '）';
+}
+
+/**
+ * 発表規則がどれだけ当たっているかを、FRED の過去の実績で測って表示する。
+ * 「第1営業日」「12日ごろ」といった規則は人が書いたものなので、
+ * 信じてよいかどうかは測らないと分からない。
+ */
+function verifyRules() {
+  validateConfig_();
+  if (!prop_(PROP_FRED_KEY)) {
+    const message = 'FRED のキーが必要です。スクリプト プロパティ ' + PROP_FRED_KEY
+                  + ' に設定してください。\n'
+                  + 'https://fred.stlouisfed.org/docs/api/api_key.html';
+    log_(message);
+    return message;
+  }
+
+  const stats = measureRuleAccuracy_(12);
+  if (stats === null) {
+    const message = 'FRED から過去の発表日を取得できませんでした。';
+    log_(message);
+    return message;
+  }
+  if (!stats.length) {
+    const message = '突き合わせられる実績がありませんでした。';
+    log_(message);
+    return message;
+  }
+
+  const lines = ['過去12か月の実際の発表日と、発表規則の予想を突き合わせた結果', '',
+                 '  ずれ(平均)  的中率  最大ずれ  指標', ''];
+  stats.forEach(function (entry) {
+    lines.push('  ' + (entry.meanGap + ' 日').padStart(8)
+               + (entry.exactRate + '%').padStart(8)
+               + (entry.worst + ' 日').padStart(10)
+               + '  ' + entry.name + '（' + entry.samples + '件）');
+  });
+  lines.push('');
+  lines.push('ずれが大きい指標は、01_indicators.js の schedule を見直す価値があります。');
+  lines.push('なお FRED が扱う指標は、実際の同期では公式の発表日が使われるので、');
+  lines.push('規則のずれはカレンダーには出ません。ここで効くのは FRED が扱わない指標です。');
 
   const text = lines.join('\n');
   log_(text);
@@ -3789,6 +4132,23 @@ function runTests() {
   check('指標カタログの書式に誤りがない', function () {
     const problems = catalogProblems_();
     if (problems.length) throw new Error(problems.join(' / '));
+  });
+
+  check('根拠を偽っている予定が無い', function () {
+    // 外部から何も取っていない状態で「公式」を名乗る予定があってはならない。
+    const saved = JSON.parse(JSON.stringify(CONFIG.providers));
+    CONFIG.providers.fred = false;
+    CONFIG.providers.earnings = false;
+    CONFIG.providers.investing = false;
+    CONFIG.providers.fomcAutoFetch = false;
+    try {
+      const events = collectEvents_({ start: ymd_(2026, 9, 1), end: ymd_(2026, 10, 31),
+                                      timezone: CONFIG.timezone });
+      const lying = events.filter(function (e) { return e.confidence === 'official'; });
+      eq(lying.length, 0, lying.map(function (e) { return e.indicatorId; }).join(','));
+    } finally {
+      Object.keys(saved).forEach(function (k) { CONFIG.providers[k] = saved[k]; });
+    }
   });
 
   check('通信なしで1か月ぶんの予定が組める', function () {

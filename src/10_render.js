@@ -26,7 +26,7 @@ function renderTitle_(event) {
   parts.push(event.title);
   if (CONFIG.display.showScore) parts.push('[' + event.impact + ']');
   if (event.actual) parts.push('→ ' + event.actual);
-  else if (event.estimated) parts.push('(予定日未確定)');
+  else if (isEstimated_(event)) parts.push('(予定日未確定)');
   return parts.join(' ');
 }
 
@@ -62,6 +62,9 @@ function renderDescription_(event) {
                + '  (現地 ' + eastern.time + ' ET)');
   }
   if (event.period) lines.push('対象期間 ' + event.period);
+  // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
+  // どこまで信じてよいかを判断できるようにするため。
+  lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
     .filter(function (pair) { return !!pair[1]; });
@@ -77,7 +80,7 @@ function renderDescription_(event) {
   }
 
   lines.push('');
-  if (event.estimated) {
+  if (isEstimated_(event)) {
     lines.push('⚠️ この日付は過去の慣例から推定したものです。'
                + '公式発表で前後する可能性があります。');
   }
@@ -94,7 +97,7 @@ function renderLine_(event) {
   const when = local.short + '(' + local.weekday + ')'
              + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
   const flag = FLAGS[event.country] || '  ';
-  const mark = event.estimated ? '~' : ' ';
+  const mark = isEstimated_(event) ? '~' : ' ';
   let figures = '';
   if (event.actual) {
     figures = '  結果 ' + event.actual + (event.forecast ? ' / 予想 ' + event.forecast : '');

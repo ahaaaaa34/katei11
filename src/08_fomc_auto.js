@@ -18,6 +18,7 @@
 const FOMC_CALENDAR_URL = 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm';
 const PROP_FOMC_AUTO = '_fomcAuto';
 const PROP_FOMC_AUTO_MAILED = '_fomcAutoMailed';
+const PROP_FOMC_CONFLICT_MAILED = '_fomcConflictMailed';
 
 /** 取得結果はこの日数だけ使い回す（毎回取りに行く必要はない）。 */
 const FOMC_AUTO_TTL_DAYS = 7;
@@ -25,8 +26,6 @@ const FOMC_AUTO_TTL_DAYS = 7;
 /** 何も採用できなかったときのキャッシュ期間。復旧に早く追随するため短くする。 */
 const FOMC_AUTO_EMPTY_TTL_DAYS = 1;
 
-/** 手入力の日程がこの日数より先まであるなら、そもそも取りに行かない。 */
-const FOMC_AUTO_TRIGGER_DAYS = 180;
 
 /** 1回の実行のあいだは取得結果を使い回す（失敗も含めて1回で済ませる）。 */
 let FOMC_AUTO_MEMO_ = null;
@@ -50,25 +49,103 @@ const SEP_MONTHS = [3, 6, 9, 12];
 function allMeetings_(bank) {
   const section = MEETINGS[bank] || {};
   const curated = (section.meetings || []).map(function (entry) {
-    return { date: entry.date, sep: !!entry.sep, auto: false };
+    return {
+      date: entry.date,
+      sep: !!entry.sep,
+      auto: false,
+      // 人が書いたまま。公式と照合するまでは「未確定」として扱う。
+      confidence: 'estimated',
+    };
   });
   if (bank !== 'fomc' || !CONFIG.providers.fomcAutoFetch) return curated;
+  return reconcileFomc_(curated, autoFomcMeetings_(curated));
+}
 
-  let maxYear = 0;
+/**
+ * 手入力の日程を、公式ページから取った日程と突き合わせる。
+ *
+ *  一致した年   → その年は「公式で確認済み」に格上げする
+ *  食い違った年 → **公式の方を採る**。手入力は人の記憶や写し間違いが入りうる
+ *                 のに対し、こちらは検査を通った公式ページの記載だから。
+ *                 そのうえで、どこがどう違うかをメールで知らせる。
+ *  取れなかった年 → 手入力のまま（未確定の扱いを維持する）
+ */
+function reconcileFomc_(curated, auto) {
+  const byYear = {};
   curated.forEach(function (entry) {
     const year = parseDateKey_(entry.date).getUTCFullYear();
-    if (year > maxYear) maxYear = year;
+    (byYear[year] = byYear[year] || []).push(entry);
   });
 
-  const auto = autoFomcMeetings_(curated);
-  const merged = curated.slice();
-  Object.keys(auto).forEach(function (year) {
-    if (Number(year) <= maxYear) return;   // 手入力がある年は触らない
-    auto[year].forEach(function (entry) {
-      merged.push({ date: entry.date, sep: entry.sep, auto: true });
+  const out = [];
+  const conflicts = [];
+
+  Object.keys(byYear).forEach(function (year) {
+    const mine = byYear[year];
+    const official = auto[year];
+    if (!official || !official.length) {
+      out.push.apply(out, mine);
+      return;
+    }
+    const mineDates = mine.map(function (m) { return m.date; }).sort().join(',');
+    const officialDates = official.map(function (m) { return m.date; }).sort().join(',');
+
+    if (mineDates === officialDates) {
+      mine.forEach(function (entry) {
+        out.push({ date: entry.date, sep: entry.sep, auto: false, confidence: 'official' });
+      });
+      return;
+    }
+    conflicts.push({ year: year, mine: mineDates, official: officialDates });
+    official.forEach(function (entry) {
+      out.push({ date: entry.date, sep: entry.sep, auto: true, confidence: 'official' });
     });
   });
-  return merged.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+
+  // 手入力がまったく無い年は、そのまま自動取得ぶんを使う。
+  Object.keys(auto).forEach(function (year) {
+    if (byYear[year]) return;
+    auto[year].forEach(function (entry) {
+      out.push({ date: entry.date, sep: entry.sep, auto: true, confidence: 'official' });
+    });
+  });
+
+  notifyFomcConflicts_(conflicts);
+  return out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+}
+
+/** 手入力と公式が食い違ったら、放置せずに知らせる（同じ内容は繰り返さない）。 */
+function notifyFomcConflicts_(conflicts) {
+  if (!conflicts.length) return false;
+  const signature = conflicts.map(function (c) { return c.year + ':' + c.official; }).join('|');
+  if (prop_(PROP_FOMC_CONFLICT_MAILED) === signature) return false;
+
+  const body = [
+    'FOMC の会合日程が、手入力（02_meetings.js）と Fed の公式ページで食い違いました。',
+    'カレンダーには**公式ページの日程**を入れています。',
+    '',
+  ].concat(conflicts.map(function (c) {
+    return [
+      c.year + ' 年',
+      '  手入力: ' + c.mine,
+      '  公式  : ' + c.official,
+    ].join('\n');
+  })).concat([
+    '',
+    '02_meetings.js を公式に合わせて直してください。',
+    '直すまでは毎回この照合が走り、公式の日程が使われます。',
+    (MEETINGS.fomc.verify_url || ''),
+  ]).join('\n');
+
+  log_(body);
+  sendMail_('[経済指標カレンダー] FOMC 日程が公式と食い違っています', body);
+  postWebhook_(body);
+  try {
+    props_().setProperty(PROP_FOMC_CONFLICT_MAILED, signature);
+  } catch (err) {
+    log_('通知状態を保存できませんでした: ' + err);
+  }
+  return true;
 }
 
 /** 自動取得ぶんの会合日程（年 → 配列）。キャッシュ付き。 */
@@ -85,7 +162,6 @@ function fetchAutoFomcMeetings_(curated) {
     ? FOMC_AUTO_EMPTY_TTL_DAYS : FOMC_AUTO_TTL_DAYS;
   const fresh = cached && (Date.now() - cached.fetchedAt) < ttlDays * 86400000;
   if (fresh) return cached.years;
-  if (!needsAutoFomc_(curated)) return cached ? cached.years : {};
 
   const html = fetchText_(FOMC_CALENDAR_URL);
   if (html === null) {
@@ -115,15 +191,6 @@ function fetchAutoFomcMeetings_(curated) {
   maybeMailFomcSnippet_(accepted, curated);
   log_('FOMC 自動取得: ' + Object.keys(accepted).join(', ') + ' 年ぶんを採用');
   return accepted;
-}
-
-/** 手入力がまだ十分先まであるなら、取りに行かない。 */
-function needsAutoFomc_(curated) {
-  if (!curated.length) return true;
-  let last = '';
-  curated.forEach(function (entry) { if (entry.date > last) last = entry.date; });
-  const horizon = addDays_(localDate_(new Date(), CONFIG.timezone), FOMC_AUTO_TRIGGER_DAYS);
-  return parseDateKey_(last).getTime() < horizon.getTime();
 }
 
 function readAutoCache_() {
