@@ -2947,6 +2947,185 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 4周目: 壊れた・極端な・敵意のある入力。
+// 「取得先がいつも行儀よく答える」という前提を全部外して突いた結果。
+// ---------------------------------------------------------------------------
+suite('型の名前に、オブジェクトの持ち物を通さない', () => {
+  const POISON = ['__proto__', 'constructor', 'toString', 'hasOwnProperty',
+                  'valueOf', '__defineGetter__'];
+
+  test('根拠として認めるのは4種類だけ', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      // CONFIDENCE_RANK[name] をそのまま見ると Object の中身が返り、
+      // 「日付の根拠 toString」という予定ができてしまっていた。
+      eq(api.confidenceRank_(name), 0, name);
+      eq(event(api, { confidence: name }).confidence, 'estimated', name);
+    });
+  });
+
+  test('時刻の根拠として認めるのは3種類だけ', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      eq(api.timeRank_(name), 0, name);
+      eq(event(api, { timeSource: name }).timeSource, 'fallback', name);
+    });
+  });
+
+  test('カレンダーに保存された値が書き換えられていても、型は守る', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.concat(['', 'OFFICIAL', 'まったく別の値']).forEach((name) => {
+      const back = api.eventFromResource_({
+        id: 'ec' + 'a'.repeat(30), summary: 'x',
+        start: { dateTime: '2026-09-11T12:30:00.000Z' },
+        end: { dateTime: '2026-09-11T13:00:00.000Z' },
+        extendedProperties: { private: { ecal: '1', indicator: 'us_cpi', impact: '98',
+                                         confidence: name, ts: name } },
+      });
+      ok(['official', 'reported', 'rule', 'estimated'].indexOf(back.confidence) >= 0,
+         name + ' -> ' + back.confidence);
+      ok(['official', 'reported', 'fallback'].indexOf(back.timeSource) >= 0,
+         name + ' -> ' + back.timeSource);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('長すぎる中身で、同期そのものを失敗させない', () => {
+  test('取得先が飲み込んだ長文が、そのまま件名に入らない', () => {
+    // 「値」の欄がページの残り全部を飲み込むと、9000 文字の件名になって
+    // Google に弾かれ、**その回の同期が丸ごと失敗**していた。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const huge = event(api, { indicatorId: 'us_cpi', actual: 'x'.repeat(9000),
+                              forecast: 'y'.repeat(9000), note: 'z'.repeat(9000) });
+    ok(huge.actual.length <= 40, '入口で切ること: ' + huge.actual.length);
+    ok(huge.note.length <= 3000, huge.note.length);
+
+    const resource = api.toCalendarResource_(huge);
+    ok(resource.summary.length <= 1024, '件名: ' + resource.summary.length);
+    ok(resource.description.length <= 8192, '説明: ' + resource.description.length);
+  });
+
+  test('入口の制限を通らずに来たものも、最後に必ず切る', () => {
+    // makeEvent_ を通らない経路がこの先できても、Google に弾かれる長さの
+    // ものを投げないための最後の防波堤。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const raw = {
+      indicatorId: 'us_cpi', title: 'T'.repeat(4000), impact: 98,
+      country: 'US', category: '物価', source: 'fred',
+      confidence: 'official', timeSource: 'fallback', exactTime: false,
+      allDay: false, period: null, actual: 'A'.repeat(4000), forecast: null,
+      previous: null, note: 'N'.repeat(20000), url: null, extra: {},
+      start: new Date(Date.UTC(2026, 8, 11, 12, 30)),
+      end: new Date(Date.UTC(2026, 8, 11, 13, 0)),
+    };
+    const resource = api.toCalendarResource_(raw);
+    ok(resource.summary.length <= 1024, '件名: ' + resource.summary.length);
+    ok(resource.description.length <= 8192, '説明: ' + resource.description.length);
+    ok(resource.summary.indexOf('…') !== -1, '切ったと分かる印が付くこと');
+  });
+
+  test('保存済みの予定が長大でも、組み立て直せる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const back = api.eventFromResource_({
+      id: 'ec' + 'a'.repeat(30), summary: 's'.repeat(9000),
+      start: { dateTime: '2026-09-11T12:30:00.000Z' },
+      end: { dateTime: '2026-09-11T13:00:00.000Z' },
+      extendedProperties: { private: { ecal: '1', indicator: 'なにか未知の指標',
+                                       impact: '98', a: 'x'.repeat(9000) } },
+    });
+    const resource = api.toCalendarResource_(back);
+    ok(resource.summary.length <= 1024, resource.summary.length);
+    ok(resource.description.length <= 8192, resource.description.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('読めない日付を、そのまま先へ流さない', () => {
+  test('日付として読めないものは null で返す', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    ['', 'x', '0000-00-00', '9999-99-99', '2026-02-30', '2026-13-01',
+     '2026/09/11', '20260911', null, undefined].forEach((text) => {
+      eq(api.parseDateKey_(text), null, JSON.stringify(text));
+    });
+    eq(K(api.parseDateKey_('2026-09-11')), '2026-09-11');
+    eq(K(api.parseDateKey_('2026-09-11T12:00:00Z')), '2026-09-11', '時刻付きも読める');
+    eq(K(api.parseDateKey_('2026-2-3')), '2026-02-03', '0 詰めでなくても読める');
+  });
+
+  test('読めない日時で予定を作ろうとしたら、はっきり止まる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    throws(() => api.makeEvent_({ indicatorId: 'us_cpi', title: 'x', impact: 50,
+                                  start: new Date('でたらめ'), end: new Date() }),
+           '妥当な Date');
+  });
+
+  test('FRED が壊れた日付を返しても、その行だけ飛ばす', () => {
+    const body = JSON.stringify({ release_dates: [
+      { release_name: 'Consumer Price Index', date: 'でたらめ' },
+      { release_name: 'Consumer Price Index', date: '9999-99-99' },
+      { release_name: 'Producer Price Index', date: '2026-09-16' },
+    ] });
+    const api = loadGas({
+      Calendar: fakeCalendar(), properties: { FRED_API_KEY: 'k' },
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                     getContentText: () => body }) },
+    });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const events = api.providerFred_(ctx);
+    eq(events.map((e) => e.indicatorId), ['us_ppi'], '読めた行だけ残ること');
+  });
+
+  test('FRED の応答が配列でなくても落ちない', () => {
+    ['{"release_dates":"x"}', '{"release_dates":123}', 'null', '[]', '0'].forEach((body) => {
+      const api = loadGas({
+        Calendar: fakeCalendar(), properties: { FRED_API_KEY: 'k' },
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                       getContentText: () => body }) },
+      });
+      const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+      eq(api.providerFred_(ctx), [], body);
+    });
+  });
+
+  test('手入力の会合日程が壊れていても、そこだけ飛ばす', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.providers.fomcAutoFetch = false;
+    api.MEETINGS.fomc.meetings.push({ date: 'でたらめ', sep: false });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const events = api.providerFomc_(ctx);   // 例外が出なければ合格
+    ok(events.some((e) => e.indicatorId === 'us_fomc_rate'), '他の会合は出ること');
+    api.MEETINGS.fomc.meetings.pop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('桁違いに大きい応答で、実行時間を食いつぶさない', () => {
+  test('予定表の行が多すぎたら打ち切る', () => {
+    const rows = [];
+    for (let i = 0; i < 20000; i++) {
+      rows.push('<tr><td>2026-09-' + String((i % 28) + 1).padStart(2, '0') + '</td>'
+        + '<td>Consumer Price Index for August 2026</td><td>08:30 AM</td></tr>');
+    }
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const parsed = api.parseScheduleRows_('<table>' + rows.join('') + '</table>', 2026);
+    ok(parsed.length <= 1000, '打ち切ること: ' + parsed.length);
+    ok(parsed.length >= 3, '途中までは読めていること');
+  });
+
+  test('本物の年間予定表の大きさは、打ち切りに掛からない', () => {
+    // 年間の予定表はどの機関でも 300 行に届かない。
+    const rows = [];
+    for (let i = 0; i < 260; i++) {
+      rows.push('<tr><td>2026-09-' + String((i % 28) + 1).padStart(2, '0') + '</td>'
+        + '<td>Consumer Price Index for August 2026</td><td>08:30 AM</td></tr>');
+    }
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.parseScheduleRows_('<table>' + rows.join('') + '</table>', 2026).length, 260);
+  });
+});
+
+// ---------------------------------------------------------------------------
 suite('発表予定表（発表時刻の一次情報）', () => {
   // 機関ごとに列の並びも日付の書式も違う。class や id には頼らない。
   const BLS = '<table><tr><th>Release Date</th><th>Release</th><th>Time</th></tr>'

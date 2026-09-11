@@ -40,11 +40,13 @@ function providerFred_(ctx) {
   const suspicious = [];
 
   rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
     const name = row.release_name || '';
     if (!name) return;
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
+    if (!day) return;   // 読めない日付の行は飛ばす（そこだけ捨てる）
     matchedNames[indicator.id] = matchedNames[indicator.id] || {};
     matchedNames[indicator.id][name] = true;
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
@@ -125,6 +127,7 @@ function measureRuleAccuracy_(months) {
 
   const stats = {};
   rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
     const name = row.release_name || '';
     const indicator = name ? matchFredRelease_(name) : null;
     if (!indicator) return;
@@ -164,7 +167,8 @@ function fredReleaseDates_(apiKey, start, end) {
 
     const payload = fetchJson_(url);
     if (payload === null) return rows.length ? rows : null;
-    const page = payload.release_dates || [];
+    // 応答の形が変わって配列でなくなっても、そこで落ちない。
+    const page = Array.isArray(payload.release_dates) ? payload.release_dates : [];
     page.forEach(function (row) { rows.push(row); });
     offset += FRED_PAGE;
     if (page.length < FRED_PAGE || offset >= (payload.count || 0)) break;
@@ -462,6 +466,14 @@ function resetScheduleMemo_() { SCHEDULE_MEMO_ = {}; }
 
 /** 発表予定表として認めるための下限。これを割ったら丸ごと捨てる。 */
 const SCHEDULE_MIN_ROWS = 3;
+/**
+ * 1ページから読む行数の上限。
+ *
+ * 年間の発表予定表はどの機関でも 300 行に届かない。桁違いに多いページが
+ * 返ってきたら、それは予定表ではないか、何かが壊れている。全部なめると
+ * 実行時間の上限（GAS は6分）を1情報源で食いつぶすので、頭を押さえる。
+ */
+const SCHEDULE_MAX_ROWS = 1000;
 /** 発表時刻として現実的な範囲（現地時間）。外れたら読み間違いとみなす。 */
 const SCHEDULE_MIN_HOUR = 4;
 const SCHEDULE_MAX_HOUR = 22;
@@ -480,6 +492,7 @@ function providerOfficial_(ctx) {
       const indicator = matchScheduleRelease_(row.name);
       if (!indicator) return;
       const start = zonedTime_(row.date, row.time, source.tz || ET);
+      if (!validDate_(start)) return;
       if (!inDisplayWindow_(start, ctx)) return;
       events.push(makeEvent_({
         indicatorId: indicator.id,
@@ -566,6 +579,10 @@ function parseScheduleRows_(html, defaultYear) {
   const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
   let match;
   while ((match = rowRe.exec(html)) !== null) {
+    if (rows.length >= SCHEDULE_MAX_ROWS) {
+      log_('発表予定表の行が多すぎます。' + SCHEDULE_MAX_ROWS + ' 行で打ち切りました。');
+      break;
+    }
     const cells = [];
     const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
     let cell;

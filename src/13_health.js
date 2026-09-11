@@ -33,9 +33,11 @@ function maintenanceReport_(ctx) {
     }
 
     let last = parseDateKey_(entries[0].date);
+    if (!last) return;
     let auto = false;
     entries.forEach(function (entry) {
       const date = parseDateKey_(entry.date);
+      if (!date) return;
       if (date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
     });
 

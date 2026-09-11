@@ -53,6 +53,33 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("型の名前にプロトタイプの鍵を通す", "src/05_catalog.js",
+     "  return typeof name === 'string'\n"
+     "      && Object.prototype.hasOwnProperty.call(table, name);",
+     "  return !!table[name];"),
+    ("外から来た文字列を切らない", "src/05_catalog.js",
+     "  return s.length <= limit ? s : s.slice(0, limit - 1) + '…';", "  return s;"),
+    ("組み立てた予定の長さを見ない", "src/11_sync.js",
+     "    summary: clip_(renderTitle_(event), MAX_SUMMARY_CHARS),\n"
+     "    description: clip_(renderDescription_(event), MAX_DESCRIPTION_CHARS),",
+     "    summary: renderTitle_(event),\n"
+     "    description: renderDescription_(event),"),
+    ("読めない日時のまま予定を作る", "src/05_catalog.js",
+     "  if (!validDate_(event.start) || !validDate_(event.end)) {",
+     "  if (!(event.start instanceof Date) || !(event.end instanceof Date)) {"),
+    ("壊れた日付をそのまま日付にする", "src/04_schedule.js",
+     "  const match = /^(\\d{4})-(\\d{1,2})-(\\d{1,2})$/.exec(String(text).slice(0, 10));\n"
+     "  if (!match) return null;",
+     "  const match = (/^(\\d{4})-(\\d{1,2})-(\\d{1,2})$/.exec(String(text).slice(0, 10))\n"
+     "    || [0, String(text).slice(0, 4), '1', '1']);\n"
+     "  if (!match) return null;"),
+    ("FRED の壊れた日付の行も採る", "src/07_providers_net.js",
+     "    if (!day) return;   // 読めない日付の行は飛ばす（そこだけ捨てる）", ""),
+    ("FRED の応答が配列かを見ない", "src/07_providers_net.js",
+     "    const page = Array.isArray(payload.release_dates) ? payload.release_dates : [];",
+     "    const page = payload.release_dates || [];"),
+    ("予定表の行数を打ち切らない", "src/07_providers_net.js",
+     "    if (rows.length >= SCHEDULE_MAX_ROWS) {", "    if (false) {"),
     ("発表予定表を読まない", "src/09_collect.js",
      "  if (CONFIG.providers.officialTimes) {\n"
      "    providers.push({ name: 'official', run: providerOfficial_ });\n"

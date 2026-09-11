@@ -48,13 +48,19 @@ function sleep_(ms) {
   }
 }
 
+/** Google Calendar が受け取れる長さ。 */
+const MAX_SUMMARY_CHARS = 1000;
+const MAX_DESCRIPTION_CHARS = 8000;
+
 function toCalendarResource_(event) {
   const timezone = CONFIG.timezone;
   const tier = eventTier_(event);
   const resource = {
     id: eventCalendarId_(event, timezone),
-    summary: renderTitle_(event),
-    description: renderDescription_(event),
+    // Google の上限は件名 1024 / 説明 8192 文字。入口でも切っているが、
+    // ここが最後の防波堤。1件が長すぎるせいで同期ごと失敗させない。
+    summary: clip_(renderTitle_(event), MAX_SUMMARY_CHARS),
+    description: clip_(renderDescription_(event), MAX_DESCRIPTION_CHARS),
     // 指標は「予定」ではないので、空き時間検索の邪魔をしないようにする。
     transparency: 'transparent',
     reminders: {
@@ -343,10 +349,12 @@ function eventFromResource_(item) {
   const props = (item.extendedProperties && item.extendedProperties.private) || {};
   const indicator = indicator_(props.indicator);
   const allDay = !!(item.start && item.start.date);
+  const day = allDay ? parseDateKey_(item.start.date) : null;
+  if (allDay && !day) return null;   // 日付として読めないものは触らない
   const start = allDay
-    ? zonedTime_(parseDateKey_(item.start.date), '00:00', CONFIG.timezone)
+    ? zonedTime_(day, '00:00', CONFIG.timezone)
     : new Date(item.start.dateTime);
-  if (isNaN(start.getTime())) return null;
+  if (!validDate_(start)) return null;
   const end = allDay ? new Date(start.getTime() + 86400000)
                      : new Date(new Date(item.end.dateTime).getTime());
 

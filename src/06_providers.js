@@ -59,6 +59,7 @@ function providerFomc_(ctx) {
   Object.keys(banks).forEach(function (bank) {
     allMeetings_(bank).forEach(function (meeting) {
       const day = parseDateKey_(meeting.date);
+      if (!day) return;   // 手入力が壊れていても、そこだけ飛ばす
       const sep = !!meeting.sep;
       // 自動取得ぶんは、どこから来た日程かを説明文に残す。
       const origin = meeting.auto ? AUTO_ORIGIN_NOTE : '';

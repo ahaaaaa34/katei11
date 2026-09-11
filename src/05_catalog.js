@@ -151,8 +151,21 @@ const CONFIDENCE_LABEL = {
   estimated: '概算（未確定）',
 };
 
+/**
+ * 型の名前として認めるか。
+ *
+ * `CONFIDENCE_RANK[name]` をそのまま見ると、name が '__proto__' や
+ * 'toString' のときに Object の中身が返ってきて、型外の値が真として
+ * 通ってしまう。カレンダーに「日付の根拠 toString」と出かねないので、
+ * 自分で持っている鍵かどうかで判定する。
+ */
+function hasKey_(table, name) {
+  return typeof name === 'string'
+      && Object.prototype.hasOwnProperty.call(table, name);
+}
+
 function confidenceRank_(name) {
-  return CONFIDENCE_RANK[name] || 0;
+  return hasKey_(CONFIDENCE_RANK, name) ? CONFIDENCE_RANK[name] : 0;
 }
 
 /**
@@ -173,7 +186,7 @@ const TIME_LABEL = {
 };
 
 function timeRank_(name) {
-  return TIME_RANK[name] || 0;
+  return hasKey_(TIME_RANK, name) ? TIME_RANK[name] : 0;
 }
 
 /** 件名に「未確定」と出すのはこれだけ。 */
@@ -204,10 +217,29 @@ function tierFor_(impact) {
   return 'C';
 }
 
+/**
+ * 外から来た文字列の長さの上限。
+ *
+ * Google が受け取れるのは件名 1024 文字・説明 8192 文字まで。
+ * 取得先のマークアップが変わって「値」の欄がページの残り全部を
+ * 飲み込むと、そのまま件名に入って**同期そのものが失敗する**。
+ * 1件の読み取り事故で全部止まらないよう、入口で切っておく。
+ */
+const MAX_TITLE_CHARS = 200;
+const MAX_FIGURE_CHARS = 40;
+const MAX_NOTE_CHARS = 3000;
+const MAX_PERIOD_CHARS = 60;
+
+function clip_(text, limit) {
+  if (text === null || text === undefined) return null;
+  const s = String(text);
+  return s.length <= limit ? s : s.slice(0, limit - 1) + '…';
+}
+
 function makeEvent_(fields) {
   const event = {
     indicatorId: fields.indicatorId,
-    title: fields.title,
+    title: clip_(fields.title, MAX_TITLE_CHARS),
     start: fields.start,
     end: fields.end,
     impact: Math.max(0, Math.min(100, fields.impact | 0)),
@@ -216,28 +248,35 @@ function makeEvent_(fields) {
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
     // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
-    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
+    confidence: hasKey_(CONFIDENCE_RANK, fields.confidence) ? fields.confidence : 'estimated',
     // 発表時刻の出どころ。指定が無ければ、外から時刻を持ってきたかどうかで
     // 決める（exactTime だけを渡す古い呼び方との互換のため）。
-    timeSource: TIME_RANK[fields.timeSource] ? fields.timeSource
+    timeSource: hasKey_(TIME_RANK, fields.timeSource) ? fields.timeSource
       : (fields.exactTime ? 'reported' : 'fallback'),
-    period: fields.period || null,
-    actual: fields.actual || null,
-    forecast: fields.forecast || null,
-    previous: fields.previous || null,
-    note: fields.note || '',
+    period: fields.period ? clip_(fields.period, MAX_PERIOD_CHARS) : null,
+    actual: fields.actual ? clip_(fields.actual, MAX_FIGURE_CHARS) : null,
+    forecast: fields.forecast ? clip_(fields.forecast, MAX_FIGURE_CHARS) : null,
+    previous: fields.previous ? clip_(fields.previous, MAX_FIGURE_CHARS) : null,
+    note: fields.note ? clip_(fields.note, MAX_NOTE_CHARS) : '',
     url: fields.url || null,
     extra: fields.extra || {},
   };
   // 「暫定値ではない」＝カタログの時刻をそのまま当てたのではない、という意味。
   event.exactTime = event.timeSource !== 'fallback';
-  if (!(event.start instanceof Date) || !(event.end instanceof Date)) {
-    throw new Error(event.indicatorId + ': start/end は Date である必要があります');
+  if (!validDate_(event.start) || !validDate_(event.end)) {
+    // 読めない日付のまま進むと、カレンダーにでたらめな日時が入る。
+    // 取得先が壊れた値を返したときは、その行を飛ばすのが情報源側の責任。
+    throw new Error(event.indicatorId + ': start/end は妥当な Date である必要があります');
   }
   if (event.end.getTime() < event.start.getTime()) {
     throw new Error(event.indicatorId + ': end が start より前です');
   }
   return event;
+}
+
+/** Date として読める値か（Invalid Date も instanceof Date を通ってしまう）。 */
+function validDate_(value) {
+  return value instanceof Date && !isNaN(value.getTime());
 }
 
 function eventTier_(event) {

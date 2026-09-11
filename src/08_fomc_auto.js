@@ -73,7 +73,9 @@ function allMeetings_(bank) {
 function reconcileFomc_(curated, auto) {
   const byYear = {};
   curated.forEach(function (entry) {
-    const year = parseDateKey_(entry.date).getUTCFullYear();
+    const parsed = parseDateKey_(entry.date);
+    if (!parsed) return;
+    const year = parsed.getUTCFullYear();
     (byYear[year] = byYear[year] || []).push(entry);
   });
 
@@ -314,6 +316,7 @@ function validateFomcYear_(meetings, year) {
     seen[key] = true;
 
     const date = parseDateKey_(key);
+    if (!date) return;
     if (isNaN(date.getTime())) return '日付として読めない: ' + key;
     if (date.getUTCFullYear() !== year) return year + ' 年でない日付: ' + key;
     // 政策金利の発表は会合最終日で、実際には火〜木にしか来ない。
@@ -344,7 +347,9 @@ function validateFomcYear_(meetings, year) {
 function maybeMailFomcSnippet_(accepted, curated) {
   let maxCurated = 0;
   curated.forEach(function (entry) {
-    const year = parseDateKey_(entry.date).getUTCFullYear();
+    const parsed = parseDateKey_(entry.date);
+    if (!parsed) return;
+    const year = parsed.getUTCFullYear();
     if (year > maxCurated) maxCurated = year;
   });
 

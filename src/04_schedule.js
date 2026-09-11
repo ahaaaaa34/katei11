@@ -22,9 +22,24 @@ function dateKey_(date) {
   return date.getUTCFullYear() + '-' + pad2_(date.getUTCMonth() + 1) + '-' + pad2_(date.getUTCDate());
 }
 
+/**
+ * "YYYY-MM-DD" を日付にする。読めなければ null。
+ *
+ * 取得先が壊れた値（空文字・"9999-99-99"・null）を返したとき、
+ * Invalid Date のまま先へ流すとカレンダーにでたらめな日時が入る。
+ * ここで止めて、情報源側にその行を飛ばさせる。
+ */
 function parseDateKey_(text) {
-  const parts = String(text).slice(0, 10).split('-');
-  return ymd_(+parts[0], +parts[1], +parts[2]);
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(text).slice(0, 10));
+  if (!match) return null;
+  const year = +match[1];
+  const month = +match[2];
+  const day = +match[3];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = ymd_(year, month, day);
+  // 2026-02-30 のような「無い日」を弾く。
+  if (date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return date;
 }
 
 function addDays_(date, days) {

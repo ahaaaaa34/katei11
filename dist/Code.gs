@@ -1111,9 +1111,24 @@ function dateKey_(date) {
   return date.getUTCFullYear() + '-' + pad2_(date.getUTCMonth() + 1) + '-' + pad2_(date.getUTCDate());
 }
 
+/**
+ * "YYYY-MM-DD" を日付にする。読めなければ null。
+ *
+ * 取得先が壊れた値（空文字・"9999-99-99"・null）を返したとき、
+ * Invalid Date のまま先へ流すとカレンダーにでたらめな日時が入る。
+ * ここで止めて、情報源側にその行を飛ばさせる。
+ */
 function parseDateKey_(text) {
-  const parts = String(text).slice(0, 10).split('-');
-  return ymd_(+parts[0], +parts[1], +parts[2]);
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(text).slice(0, 10));
+  if (!match) return null;
+  const year = +match[1];
+  const month = +match[2];
+  const day = +match[3];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = ymd_(year, month, day);
+  // 2026-02-30 のような「無い日」を弾く。
+  if (date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return date;
 }
 
 function addDays_(date, days) {
@@ -1589,8 +1604,21 @@ const CONFIDENCE_LABEL = {
   estimated: '概算（未確定）',
 };
 
+/**
+ * 型の名前として認めるか。
+ *
+ * `CONFIDENCE_RANK[name]` をそのまま見ると、name が '__proto__' や
+ * 'toString' のときに Object の中身が返ってきて、型外の値が真として
+ * 通ってしまう。カレンダーに「日付の根拠 toString」と出かねないので、
+ * 自分で持っている鍵かどうかで判定する。
+ */
+function hasKey_(table, name) {
+  return typeof name === 'string'
+      && Object.prototype.hasOwnProperty.call(table, name);
+}
+
 function confidenceRank_(name) {
-  return CONFIDENCE_RANK[name] || 0;
+  return hasKey_(CONFIDENCE_RANK, name) ? CONFIDENCE_RANK[name] : 0;
 }
 
 /**
@@ -1611,7 +1639,7 @@ const TIME_LABEL = {
 };
 
 function timeRank_(name) {
-  return TIME_RANK[name] || 0;
+  return hasKey_(TIME_RANK, name) ? TIME_RANK[name] : 0;
 }
 
 /** 件名に「未確定」と出すのはこれだけ。 */
@@ -1642,10 +1670,29 @@ function tierFor_(impact) {
   return 'C';
 }
 
+/**
+ * 外から来た文字列の長さの上限。
+ *
+ * Google が受け取れるのは件名 1024 文字・説明 8192 文字まで。
+ * 取得先のマークアップが変わって「値」の欄がページの残り全部を
+ * 飲み込むと、そのまま件名に入って**同期そのものが失敗する**。
+ * 1件の読み取り事故で全部止まらないよう、入口で切っておく。
+ */
+const MAX_TITLE_CHARS = 200;
+const MAX_FIGURE_CHARS = 40;
+const MAX_NOTE_CHARS = 3000;
+const MAX_PERIOD_CHARS = 60;
+
+function clip_(text, limit) {
+  if (text === null || text === undefined) return null;
+  const s = String(text);
+  return s.length <= limit ? s : s.slice(0, limit - 1) + '…';
+}
+
 function makeEvent_(fields) {
   const event = {
     indicatorId: fields.indicatorId,
-    title: fields.title,
+    title: clip_(fields.title, MAX_TITLE_CHARS),
     start: fields.start,
     end: fields.end,
     impact: Math.max(0, Math.min(100, fields.impact | 0)),
@@ -1654,28 +1701,35 @@ function makeEvent_(fields) {
     source: fields.source || 'rules',
     allDay: !!fields.allDay,
     // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
-    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
+    confidence: hasKey_(CONFIDENCE_RANK, fields.confidence) ? fields.confidence : 'estimated',
     // 発表時刻の出どころ。指定が無ければ、外から時刻を持ってきたかどうかで
     // 決める（exactTime だけを渡す古い呼び方との互換のため）。
-    timeSource: TIME_RANK[fields.timeSource] ? fields.timeSource
+    timeSource: hasKey_(TIME_RANK, fields.timeSource) ? fields.timeSource
       : (fields.exactTime ? 'reported' : 'fallback'),
-    period: fields.period || null,
-    actual: fields.actual || null,
-    forecast: fields.forecast || null,
-    previous: fields.previous || null,
-    note: fields.note || '',
+    period: fields.period ? clip_(fields.period, MAX_PERIOD_CHARS) : null,
+    actual: fields.actual ? clip_(fields.actual, MAX_FIGURE_CHARS) : null,
+    forecast: fields.forecast ? clip_(fields.forecast, MAX_FIGURE_CHARS) : null,
+    previous: fields.previous ? clip_(fields.previous, MAX_FIGURE_CHARS) : null,
+    note: fields.note ? clip_(fields.note, MAX_NOTE_CHARS) : '',
     url: fields.url || null,
     extra: fields.extra || {},
   };
   // 「暫定値ではない」＝カタログの時刻をそのまま当てたのではない、という意味。
   event.exactTime = event.timeSource !== 'fallback';
-  if (!(event.start instanceof Date) || !(event.end instanceof Date)) {
-    throw new Error(event.indicatorId + ': start/end は Date である必要があります');
+  if (!validDate_(event.start) || !validDate_(event.end)) {
+    // 読めない日付のまま進むと、カレンダーにでたらめな日時が入る。
+    // 取得先が壊れた値を返したときは、その行を飛ばすのが情報源側の責任。
+    throw new Error(event.indicatorId + ': start/end は妥当な Date である必要があります');
   }
   if (event.end.getTime() < event.start.getTime()) {
     throw new Error(event.indicatorId + ': end が start より前です');
   }
   return event;
+}
+
+/** Date として読める値か（Invalid Date も instanceof Date を通ってしまう）。 */
+function validDate_(value) {
+  return value instanceof Date && !isNaN(value.getTime());
 }
 
 function eventTier_(event) {
@@ -1815,6 +1869,7 @@ function providerFomc_(ctx) {
   Object.keys(banks).forEach(function (bank) {
     allMeetings_(bank).forEach(function (meeting) {
       const day = parseDateKey_(meeting.date);
+      if (!day) return;   // 手入力が壊れていても、そこだけ飛ばす
       const sep = !!meeting.sep;
       // 自動取得ぶんは、どこから来た日程かを説明文に残す。
       const origin = meeting.auto ? AUTO_ORIGIN_NOTE : '';
@@ -2034,11 +2089,13 @@ function providerFred_(ctx) {
   const suspicious = [];
 
   rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
     const name = row.release_name || '';
     if (!name) return;
     const indicator = matchFredRelease_(name);
     if (!indicator) return;
     const day = parseDateKey_(row.date);
+    if (!day) return;   // 読めない日付の行は飛ばす（そこだけ捨てる）
     matchedNames[indicator.id] = matchedNames[indicator.id] || {};
     matchedNames[indicator.id][name] = true;
     const start = zonedTime_(day, indicator.time, indicatorTimezone_(indicator));
@@ -2119,6 +2176,7 @@ function measureRuleAccuracy_(months) {
 
   const stats = {};
   rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
     const name = row.release_name || '';
     const indicator = name ? matchFredRelease_(name) : null;
     if (!indicator) return;
@@ -2158,7 +2216,8 @@ function fredReleaseDates_(apiKey, start, end) {
 
     const payload = fetchJson_(url);
     if (payload === null) return rows.length ? rows : null;
-    const page = payload.release_dates || [];
+    // 応答の形が変わって配列でなくなっても、そこで落ちない。
+    const page = Array.isArray(payload.release_dates) ? payload.release_dates : [];
     page.forEach(function (row) { rows.push(row); });
     offset += FRED_PAGE;
     if (page.length < FRED_PAGE || offset >= (payload.count || 0)) break;
@@ -2456,6 +2515,14 @@ function resetScheduleMemo_() { SCHEDULE_MEMO_ = {}; }
 
 /** 発表予定表として認めるための下限。これを割ったら丸ごと捨てる。 */
 const SCHEDULE_MIN_ROWS = 3;
+/**
+ * 1ページから読む行数の上限。
+ *
+ * 年間の発表予定表はどの機関でも 300 行に届かない。桁違いに多いページが
+ * 返ってきたら、それは予定表ではないか、何かが壊れている。全部なめると
+ * 実行時間の上限（GAS は6分）を1情報源で食いつぶすので、頭を押さえる。
+ */
+const SCHEDULE_MAX_ROWS = 1000;
 /** 発表時刻として現実的な範囲（現地時間）。外れたら読み間違いとみなす。 */
 const SCHEDULE_MIN_HOUR = 4;
 const SCHEDULE_MAX_HOUR = 22;
@@ -2474,6 +2541,7 @@ function providerOfficial_(ctx) {
       const indicator = matchScheduleRelease_(row.name);
       if (!indicator) return;
       const start = zonedTime_(row.date, row.time, source.tz || ET);
+      if (!validDate_(start)) return;
       if (!inDisplayWindow_(start, ctx)) return;
       events.push(makeEvent_({
         indicatorId: indicator.id,
@@ -2560,6 +2628,10 @@ function parseScheduleRows_(html, defaultYear) {
   const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
   let match;
   while ((match = rowRe.exec(html)) !== null) {
+    if (rows.length >= SCHEDULE_MAX_ROWS) {
+      log_('発表予定表の行が多すぎます。' + SCHEDULE_MAX_ROWS + ' 行で打ち切りました。');
+      break;
+    }
     const cells = [];
     const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
     let cell;
@@ -2786,7 +2858,9 @@ function allMeetings_(bank) {
 function reconcileFomc_(curated, auto) {
   const byYear = {};
   curated.forEach(function (entry) {
-    const year = parseDateKey_(entry.date).getUTCFullYear();
+    const parsed = parseDateKey_(entry.date);
+    if (!parsed) return;
+    const year = parsed.getUTCFullYear();
     (byYear[year] = byYear[year] || []).push(entry);
   });
 
@@ -3027,6 +3101,7 @@ function validateFomcYear_(meetings, year) {
     seen[key] = true;
 
     const date = parseDateKey_(key);
+    if (!date) return;
     if (isNaN(date.getTime())) return '日付として読めない: ' + key;
     if (date.getUTCFullYear() !== year) return year + ' 年でない日付: ' + key;
     // 政策金利の発表は会合最終日で、実際には火〜木にしか来ない。
@@ -3057,7 +3132,9 @@ function validateFomcYear_(meetings, year) {
 function maybeMailFomcSnippet_(accepted, curated) {
   let maxCurated = 0;
   curated.forEach(function (entry) {
-    const year = parseDateKey_(entry.date).getUTCFullYear();
+    const parsed = parseDateKey_(entry.date);
+    if (!parsed) return;
+    const year = parsed.getUTCFullYear();
     if (year > maxCurated) maxCurated = year;
   });
 
@@ -3524,13 +3601,19 @@ function sleep_(ms) {
   }
 }
 
+/** Google Calendar が受け取れる長さ。 */
+const MAX_SUMMARY_CHARS = 1000;
+const MAX_DESCRIPTION_CHARS = 8000;
+
 function toCalendarResource_(event) {
   const timezone = CONFIG.timezone;
   const tier = eventTier_(event);
   const resource = {
     id: eventCalendarId_(event, timezone),
-    summary: renderTitle_(event),
-    description: renderDescription_(event),
+    // Google の上限は件名 1024 / 説明 8192 文字。入口でも切っているが、
+    // ここが最後の防波堤。1件が長すぎるせいで同期ごと失敗させない。
+    summary: clip_(renderTitle_(event), MAX_SUMMARY_CHARS),
+    description: clip_(renderDescription_(event), MAX_DESCRIPTION_CHARS),
     // 指標は「予定」ではないので、空き時間検索の邪魔をしないようにする。
     transparency: 'transparent',
     reminders: {
@@ -3819,10 +3902,12 @@ function eventFromResource_(item) {
   const props = (item.extendedProperties && item.extendedProperties.private) || {};
   const indicator = indicator_(props.indicator);
   const allDay = !!(item.start && item.start.date);
+  const day = allDay ? parseDateKey_(item.start.date) : null;
+  if (allDay && !day) return null;   // 日付として読めないものは触らない
   const start = allDay
-    ? zonedTime_(parseDateKey_(item.start.date), '00:00', CONFIG.timezone)
+    ? zonedTime_(day, '00:00', CONFIG.timezone)
     : new Date(item.start.dateTime);
-  if (isNaN(start.getTime())) return null;
+  if (!validDate_(start)) return null;
   const end = allDay ? new Date(start.getTime() + 86400000)
                      : new Date(new Date(item.end.dateTime).getTime());
 
@@ -4112,9 +4197,11 @@ function maintenanceReport_(ctx) {
     }
 
     let last = parseDateKey_(entries[0].date);
+    if (!last) return;
     let auto = false;
     entries.forEach(function (entry) {
       const date = parseDateKey_(entry.date);
+      if (!date) return;
       if (date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
     });
 
