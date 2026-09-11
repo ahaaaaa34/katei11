@@ -3204,6 +3204,44 @@ suite('カレンダー側で書き換えられた予定を、正しい姿に戻�
        '書き込みが起きないこと');
   });
 
+  test('件名にも時刻にも出ない変化を、取りこぼさない', () => {
+    // 予想値が届いた・解説を直した・通知の設定を変えた——どれも件名と開始は
+    // 変わらない。内容ハッシュだけが気づける変化なので、ここが効いていないと
+    // カレンダーの中身が古いまま残る。
+    const { calendar, make } = seeded();
+    const id = [...calendar.events.keys()].find(
+      (k) => (calendar.events.get(k).extendedProperties.private || {}).indicator === 'us_cpi');
+    ok(id, '題材の CPI が入っていること');
+    const before = calendar.events.get(id);
+    eq(before.description.indexOf('0.3%'), -1, 'まだ予想値は入っていない');
+
+    // 説明文だけが変わる状況を作る（予想値が届いた）
+    const api = make();
+    const ctx = api.syncWindow_(Y(2026, 9, 11));
+    const events = api.collectEvents_(ctx).map((e) => (
+      e.indicatorId === 'us_cpi' && api.eventCalendarId_(e, api.CONFIG.timezone) === id
+        ? Object.assign({}, e, { forecast: '0.3%' }) : e));
+    const existing = api.listManagedEvents_('c', ctx.start, ctx.end);
+    const plan = api.buildPlan_('c', events, existing, ctx);
+    ok(plan.updated.some((r) => r.resource.id === id),
+       '説明文だけの変化も更新として拾うこと');
+    const resource = plan.updated.find((r) => r.resource.id === id).resource;
+    eq(resource.summary, before.summary, '件名は変わっていないこと');
+    eq(resource.start.dateTime, before.start.dateTime, '開始も変わっていないこと');
+    ok(resource.description.indexOf('0.3%') !== -1, '説明文には入っていること');
+  });
+
+  test('通知の設定を変えたら、既存の予定にも反映する', () => {
+    const { calendar, make } = seeded();
+    const before = [...calendar.events.values()][0].reminders.overrides.length;
+    const api = make();
+    api.CONFIG.reminders = { S: [10, 20, 30], A: [10], B: [10], C: [10] };
+    const plan = api.syncCalendar();
+    ok(plan.updated.length > 0, '通知だけの変化でも更新すること');
+    const after = [...calendar.events.values()][0].reminders.overrides.length;
+    ok(after !== before || before === 1, before + ' -> ' + after);
+  });
+
   test('このツールが作っていない予定には触らない', () => {
     const { calendar, make } = seeded();
     calendar.events.set('someone-elses', {

@@ -375,7 +375,7 @@ Investing.com の公開エンドポイントを読みます。**公式 API で�
 ## 開発
 
 ```bash
-npm test          # 403 テスト・ネットワーク不要
+npm test          # 405 テスト・ネットワーク不要
 npm run bundle    # src/*.js → dist/Code.gs
 npm run coverage  # 一度も呼ばれていない関数を洗い出す
 npm run mutate    # テストが本当にバグを捕まえるかを検査（下記）
