@@ -53,6 +53,16 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("週次まとめも指標と同じ本文にする", "src/10_render.js",
+     "  if (isDigest_(event)) return renderDigestDescription_(event);", ""),
+    ("週次まとめの根拠を指定し忘れる", "src/12_digest.js",
+     "      confidence: 'rule',", ""),
+    ("未確定の断り書きを一種類にする", "src/10_render.js",
+     "  if (hasRule) {\n"
+     "    return 'この日付は過去の慣例から推定したものです。公式発表で前後する可能性があります。';\n"
+     "  }",
+     "  return 'この日付は過去の慣例から推定したものです。公式発表で前後する可能性があります。';\n"
+     "  if (hasRule) {}"),
     ("名寄せで国を見ない", "src/07_providers_net.js",
      "    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone),\n"
      "                                      row.country);",

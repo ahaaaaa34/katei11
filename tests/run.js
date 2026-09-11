@@ -2918,6 +2918,88 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+suite('週次まとめの見え方', () => {
+  function digestOf(api) {
+    Object.assign(api.CONFIG.providers,
+      { fred: false, earnings: false, investing: false, fomcAutoFetch: false });
+    const ctx = api.syncWindow_(Y(2026, 9, 11));
+    const all = api.weeklyDigestEvents_(api.collectEvents_(ctx), ctx);
+    // 最重要が入る週（9/14 の週）を選ぶ
+    return all.find((e) => e.title.indexOf('最重要') !== -1) || all[0];
+  }
+
+  test('まとめ自体は「予定日未確定」にならない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const digest = digestOf(api);
+    // 月曜そのものなので、日付に迷う余地がない。
+    eq(digest.confidence, 'rule');
+    ok(api.renderTitle_(digest).indexOf('予定日未確定') === -1,
+       api.renderTitle_(digest));
+  });
+
+  test('まとめの本文に、影響度や根拠の行を出さない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const text = api.renderDescription_(digestOf(api));
+    ok(text.indexOf('影響度') === -1, text);
+    ok(text.indexOf('日付の根拠') === -1, text);
+    ok(text.indexOf('⚠️') === -1, '推定の断り書きも出さない');
+    ok(text.indexOf('今週の山場') !== -1, '中身は残っていること');
+    ok(text.indexOf('自動同期') !== -1, '目印は付いていること');
+  });
+
+  test('一覧の未確定の印が、指標名の一部に見えない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const line = api.renderLine_(
+      event(api, { indicatorId: 'us_cpi', confidence: 'estimated' }));
+    ok(line.indexOf('(日付未確定)') !== -1, line);
+    ok(line.indexOf('~') === -1, '「~」は使わない: ' + line);
+
+    const sure = api.renderLine_(
+      event(api, { indicatorId: 'us_cpi', confidence: 'official' }));
+    ok(sure.indexOf('未確定') === -1, sure);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('未確定の断り書きは、未確定の中身に合わせる', () => {
+  const api = loadGas({ Calendar: fakeCalendar() });
+
+  test('発表規則から推定した日付は「推定」と書く', () => {
+    const cpi = event(api, { indicatorId: 'us_cpi', confidence: 'estimated' });
+    const text = api.renderDescription_(cpi);
+    ok(text.indexOf('過去の慣例から推定') !== -1, text);
+  });
+
+  test('会合日程は「推定」ではなく「未照合」と書く', () => {
+    // FOMC の日付は Fed が公表したものの写しで、推定ではない。
+    // 同じ文言を出すと嘘になる。
+    const fomc = event(api, { indicatorId: 'us_fomc_rate', impact: 100,
+                              confidence: 'estimated' });
+    const text = api.renderDescription_(fomc);
+    ok(text.indexOf('照合できていません') !== -1, text);
+    ok(text.indexOf('過去の慣例から推定') === -1, '推定だとは言わないこと');
+  });
+
+  test('根拠がはっきりしていれば、断り書きは出ない', () => {
+    ['official', 'reported', 'rule'].forEach((confidence) => {
+      const text = api.renderDescription_(
+        event(api, { indicatorId: 'us_cpi', confidence: confidence }));
+      ok(text.indexOf('⚠️') === -1, confidence + ': ' + text);
+    });
+  });
+
+  test('文言は、どの情報源が勝ったかで変わらない', () => {
+    // 情報源が入れ替わるたびに説明文が変わると、中身は同じなのに
+    // 更新が走り続ける。
+    const fromRules = api.renderDescription_(
+      event(api, { indicatorId: 'us_cpi', confidence: 'estimated', source: 'rules' }));
+    const fromSite = api.renderDescription_(
+      event(api, { indicatorId: 'us_cpi', confidence: 'estimated', source: 'investing' }));
+    eq(fromRules, fromSite);
+  });
+});
+
+// ---------------------------------------------------------------------------
 suite('発表名の名寄せ（取り違えると他国・他指標の数値が入る）', () => {
   const api = loadGas({ Calendar: fakeCalendar() });
   const day = Y(2026, 9, 11);

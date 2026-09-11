@@ -42,6 +42,8 @@ function formatClock_(instant, timezone) {
 }
 
 function renderDescription_(event) {
+  // 週次まとめは指標ではないので、影響度や日付の根拠を並べても意味がない。
+  if (isDigest_(event)) return renderDigestDescription_(event);
   const tier = eventTier_(event);
   const local = formatClock_(event.start, CONFIG.timezone);
   const lines = [];
@@ -80,10 +82,7 @@ function renderDescription_(event) {
   }
 
   lines.push('');
-  if (isEstimated_(event)) {
-    lines.push('⚠️ この日付は過去の慣例から推定したものです。'
-               + '公式発表で前後する可能性があります。');
-  }
+  if (isEstimated_(event)) lines.push('⚠️ ' + estimatedNote_(event));
   if (event.url) lines.push('🔗 ' + event.url);
   // どのモジュールが勝ったかは書かない。情報源が一時的に落ちて別の経路から
   // 同じ予定が組み立てられただけで説明文が変わり、更新が走ってしまうため。
@@ -95,13 +94,40 @@ function renderDescription_(event) {
   return lines.join('\n');
 }
 
+/** 週次まとめの本文。その週に何があるかの一覧だけを出す。 */
+function renderDigestDescription_(event) {
+  return String(event.note || '').trim() + '\n\n自動同期: ' + MARKER;
+}
+
+/**
+ * 日付が未確定のときの断り書き。
+ *
+ * 同じ「未確定」でも中身が違う。CPI の 12 日は過去の慣例からの推定だが、
+ * FOMC の会合日は Fed が公表したものを人が書き写しただけで、推定では
+ * ない（照合できていないだけ）。どちらにも同じ文言を出すと嘘になる。
+ *
+ * 見分けるのは発表規則の有無で、勝った情報源では見ない。情報源が入れ替わる
+ * たびに説明文が変わると、中身は同じなのに更新が走り続けるため。
+ */
+function estimatedNote_(event) {
+  const indicator = indicator_(event.indicatorId);
+  const hasRule = !!(indicator && indicator.schedule && indicator.schedule.type
+                     && indicator.schedule.type !== 'none');
+  if (hasRule) {
+    return 'この日付は過去の慣例から推定したものです。公式発表で前後する可能性があります。';
+  }
+  return 'この日程は手元の表に書かれたまま、公式ページと照合できていません。'
+       + '公式の発表で確認してください。';
+}
+
 /** 実行ログやダイジェスト用の1行表示。 */
 function renderLine_(event) {
   const local = formatClock_(event.start, CONFIG.timezone);
   const when = local.short + '(' + local.weekday + ')'
              + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
   const flag = FLAGS[event.country] || '  ';
-  const mark = isEstimated_(event) ? '~' : ' ';
+  // 「~」だと指標名の一部に見えてしまうので、日本語で書く。
+  const mark = isEstimated_(event) ? ' (日付未確定)' : '';
   let figures = '';
   if (event.actual) {
     figures = '  結果 ' + event.actual + (event.forecast ? ' / 予想 ' + event.forecast : '');
@@ -109,4 +135,9 @@ function renderLine_(event) {
     figures = '  予想 ' + event.forecast;
   }
   return when + ' ' + TIER_EMOJI[eventTier_(event)] + flag + ' ' + event.title + mark + figures;
+}
+
+/** 週次まとめの予定かどうか。 */
+function isDigest_(event) {
+  return event.indicatorId === DIGEST_ID;
 }

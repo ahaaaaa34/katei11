@@ -42,6 +42,8 @@ function weeklyDigestEvents_(events, ctx) {
       country: 'US',
       category: 'market',
       source: 'digest',
+      // その週の月曜そのもの。カレンダーの日付として迷う余地がない。
+      confidence: 'rule',
       allDay: true,
       note: '今週の山場: ' + headline + '\n\n'
           + week.map(renderLine_).join('\n'),
