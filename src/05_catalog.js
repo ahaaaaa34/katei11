@@ -39,12 +39,42 @@ function indicatorsWithRules_() {
   });
 }
 
-function matchEventName_(name) {
+/**
+ * 外部のイベント名を指標に名寄せする。
+ *
+ * 名前だけでは決められない組がある（ミシガン大の速報値と確報値は、
+ * サイトによっては同じ「Michigan Consumer Sentiment」で出る）。
+ * その場合は発表日で見分ける。速報は第2金曜、確報は最終金曜なので、
+ * どちらの発表規則に近いかで確実に判別できる。
+ *
+ * @param {string} name  外部サイトのイベント名
+ * @param {Date=} date   その発表の日付（UTC深夜）。あれば判別に使う
+ */
+function matchEventName_(name, date) {
   const matchers = catalog_().matchers;
+  const hits = [];
+  const seen = {};
   for (let i = 0; i < matchers.length; i++) {
-    if (matchers[i].re.test(name)) return matchers[i].indicator;
+    if (!matchers[i].re.test(name)) continue;
+    const indicator = matchers[i].indicator;
+    if (seen[indicator.id]) continue;
+    seen[indicator.id] = true;
+    hits.push(indicator);
   }
-  return null;
+  if (!hits.length) return null;
+  if (hits.length === 1 || !date) return hits[0];
+
+  let best = null;
+  let bestGap = Infinity;
+  hits.forEach(function (indicator) {
+    const gap = ruleDistanceDays_(indicator, date);
+    if (gap !== null && gap < bestGap) {
+      bestGap = gap;
+      best = indicator;
+    }
+  });
+  // 規則で見分けられなければ、より具体的なパターン（長い方）を採る。
+  return best || hits[0];
 }
 
 function matchFredRelease_(name) {

@@ -2476,4 +2476,82 @@ suite('FRED の対応付けの誤りを見つける', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('回帰: 名前が同じ指標に別の数値が入る', () => {
+  test('ミシガン大の速報値と確報値を発表日で見分ける', () => {
+    // どちらも「Michigan Consumer Sentiment」で出てくることがある。
+    // 名前だけで決めると、確報値の数字が速報値の予定に入ってしまう。
+    eq(G.matchEventName_('Michigan Consumer Sentiment',
+                         Y(2026, 9, 11)).id, 'us_umich_prelim', '第2金曜は速報');
+    eq(G.matchEventName_('Michigan Consumer Sentiment',
+                         Y(2026, 9, 25)).id, 'us_umich_final', '最終金曜は確報');
+    eq(G.matchEventName_('Michigan Consumer Sentiment',
+                         Y(2026, 10, 9)).id, 'us_umich_prelim');
+    eq(G.matchEventName_('Michigan Consumer Sentiment',
+                         Y(2026, 10, 30)).id, 'us_umich_final');
+  });
+
+  test('Investing の取り込みでも見分けられる', () => {
+    const row = (date) => '<tr data-event-datetime="' + date + ' 14:00:00">'
+      + '<td class="left event">Michigan Consumer Sentiment</td>'
+      + '<td id="eventActual_1">55.1</td></tr>';
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const prelim = G.investingRowsToEvents_(
+      G.parseInvestingRows_(row('2026/09/11')), ctx);
+    const final = G.investingRowsToEvents_(
+      G.parseInvestingRows_(row('2026/09/25')), ctx);
+    eq(prelim[0].indicatorId, 'us_umich_prelim');
+    eq(final[0].indicatorId, 'us_umich_final');
+  });
+
+  test('名前が1指標にしか当たらないものは従来どおり', () => {
+    [['Core CPI (MoM) (Aug)', 'us_cpi'], ['ISM Non-Manufacturing PMI', 'us_ism_services'],
+     ['Fed Chair Powell Speaks', 'us_fed_speech'], ['Nonfarm Payrolls', 'us_nfp'],
+     ['ADP Nonfarm Employment Change', 'us_adp']].forEach((pair) => {
+      eq(G.matchEventName_(pair[0], Y(2026, 9, 11)).id, pair[1], pair[0]);
+      eq(G.matchEventName_(pair[0]).id, pair[1], pair[0] + '（日付なしでも）');
+    });
+  });
+
+  test('名寄せパターンを共有する指標は、発表日で必ず見分けられること', () => {
+    // 将来パターンを足したときに、区別できない組を作らないための歯止め。
+    const byPattern = {};
+    G.INDICATORS.forEach((indicator) => {
+      (indicator.match || []).forEach((pattern) => {
+        (byPattern[pattern] = byPattern[pattern] || []).push(indicator);
+      });
+    });
+    Object.keys(byPattern).forEach((pattern) => {
+      const shared = byPattern[pattern];
+      if (shared.length < 2) return;
+      shared.forEach((indicator) => {
+        ok(indicator.schedule && indicator.schedule.type
+           && indicator.schedule.type !== 'none',
+           pattern + ' を共有する ' + indicator.id + ' に発表規則が無い（見分けられない）');
+      });
+      // 予想日が十分に離れていること
+      const dates = shared.map((indicator) => G.ruleDates_(
+        indicator.schedule, Y(2026, 9, 1), Y(2026, 9, 30)).map(K).join(','));
+      eq(new Set(dates).size, dates.length,
+         pattern + ' を共有する指標の予想日が重なっている');
+    });
+  });
+
+  test('FRED の release パターンどうしが衝突しない', () => {
+    const withFred = G.INDICATORS.filter((i) => i.fred_release);
+    withFred.forEach((a) => {
+      withFred.forEach((b) => {
+        if (a.id >= b.id) return;
+        [a.fred_release, b.fred_release].forEach((pattern) => {
+          const sample = pattern.replace(/[\^\$]/g, '');
+          const hitA = new RegExp(a.fred_release, 'i').test(sample);
+          const hitB = new RegExp(b.fred_release, 'i').test(sample);
+          ok(!(hitA && hitB),
+             '「' + sample + '」に ' + a.id + ' と ' + b.id + ' の両方が当たる');
+        });
+      });
+    });
+  });
+});
+
 process.exitCode = require('./assert').report();

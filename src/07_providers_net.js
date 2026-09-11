@@ -363,10 +363,11 @@ function investingRowsToEvents_(rows, ctx) {
   const assumeTz = CONFIG.investingAssumeTz || 'UTC';
   const events = [];
   rows.forEach(function (row) {
-    const indicator = matchEventName_(row.name);
-    if (!indicator) return;
     const start = parseInvestingDate_(row.datetime, assumeTz);
     if (!start) return;
+    // 名前が同じ指標があるので、発表日も渡して見分けてもらう。
+    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone));
+    if (!indicator) return;
     if (!inDisplayWindow_(start, ctx)) return;
 
     events.push(makeEvent_({
