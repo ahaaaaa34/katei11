@@ -276,7 +276,7 @@ const INDICATORS = [
       exact: false
     },
     why: "当月分を月内に速報する唯一の景況感指標。ISM より2週間早く方向感が出る。",
-    match: ["s&p global .*pmi", "manufacturing pmi", "services pmi"]
+    match: ["s&p global us .*pmi", "markit us .*pmi"]
   },
   {
     id: "us_conf_board_confidence",

@@ -349,6 +349,7 @@ function parseInvestingRows_(html) {
     rows.push({
       datetime: match[1],
       name: name,
+      country: investingCountry_(body),
       actual: pickText_(body, /id="eventActual_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       forecast: pickText_(body, /id="eventForecast_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       previous: pickText_(body, /id="eventPrevious_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
@@ -356,6 +357,25 @@ function parseInvestingRows_(html) {
     });
   }
   return rows;
+}
+
+/**
+ * その行がどの国の発表か。通貨の欄（USD / EUR / CNY …）から読む。
+ *
+ * 名前だけで名寄せすると、「Chinese Manufacturing PMI」が米国の
+ * S&P グローバル PMI に当たって、中国の数値が米指標の欄に入る。
+ * 読めなかったときは null を返し、従来どおり名前だけで名寄せする
+ * （マークアップが少し変わっただけで機能ごと止まらないように）。
+ */
+const INVESTING_CURRENCY_COUNTRY = {
+  USD: 'US', JPY: 'JP', EUR: 'EU', CNY: 'CN', GBP: 'GB',
+};
+
+function investingCountry_(body) {
+  const cell = pickText_(body, /<td[^>]*class="[^"]*\bflagCur\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+  if (!cell) return null;
+  const code = (/\b([A-Z]{3})\b/.exec(cell.toUpperCase()) || [])[1];
+  return (code && INVESTING_CURRENCY_COUNTRY[code]) || null;
 }
 
 function pickText_(html, regex) {
@@ -378,8 +398,9 @@ function investingRowsToEvents_(rows, ctx) {
   rows.forEach(function (row) {
     const start = parseInvestingDate_(row.datetime, assumeTz);
     if (!start) return;
-    // 名前が同じ指標があるので、発表日も渡して見分けてもらう。
-    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone));
+    // 名前が同じ指標があるので、発表日と国も渡して見分けてもらう。
+    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone),
+                                      row.country);
     if (!indicator) return;
     if (!inDisplayWindow_(start, ctx)) return;
 

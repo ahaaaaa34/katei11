@@ -382,9 +382,17 @@ function showStatus() {
     'FRED キー    : ' + (prop_(PROP_FRED_KEY) ? '設定済み' : '未設定'),
     'Webhook      : ' + (prop_(PROP_WEBHOOK_URL) ? '設定済み' : '未設定'),
     '自動実行     : ' + countTriggers_() + ' 件',
-    '',
-    maintenanceText_(maintenanceReport_(ctx)),
   ];
+
+  const unreachable = unreachableIndicators_(false);
+  if (unreachable.length) {
+    lines.push('');
+    lines.push('この設定では出てこない指標（選抜条件は通っています）:');
+    unreachable.forEach(function (row) { lines.push('  ・ ' + row); });
+  }
+
+  lines.push('');
+  lines.push(maintenanceText_(maintenanceReport_(ctx)));
   const text = lines.join('\n');
   log_(text);
   return text;
@@ -399,8 +407,70 @@ function meetingCoverage_() {
     if (meeting.date > last) last = meeting.date;
     if (meeting.confidence === 'official') verified++;
   });
-  return last + ' まで / 公式と照合済み ' + verified + ' 件中 ' + meetings.length + ' 件';
+  return last + ' まで / ' + meetings.length + ' 件中 ' + verified + ' 件が公式と照合済み';
 }
+
+/**
+ * 「カタログには載っているのに、いまの設定では絶対に出てこない指標」。
+ *
+ * いちばん気づきにくい壊れ方は、エラーも出ず、ただ永久に出てこないこと。
+ * 日銀の会合を待っていたのに 02_meetings.js が空のまま、というのがその例。
+ * 選抜条件を通るのに出しようが無いものは、理由を添えて挙げておく。
+ *
+ * all を true にすると、選抜条件で外れているものも含めて全部返す。
+ */
+function unreachableIndicators_(all) {
+  const rows = [];
+  INDICATORS.forEach(function (indicator) {
+    if (!all && !selectedByFilter_(indicator)) return;
+    const why = whyUnreachable_(indicator);
+    if (why) rows.push(indicator.name + ' — ' + why);
+  });
+  return rows;
+}
+
+/** その指標が、いまの選抜条件を通るか（発表日の有無は見ない）。 */
+function selectedByFilter_(indicator) {
+  return applyFilter_([{
+    indicatorId: indicator.id, impact: indicator.impact,
+    country: indicator.country, category: indicator.category,
+  }]).length > 0;
+}
+
+/** 出てこない理由。出てくるなら空文字。 */
+function whyUnreachable_(indicator) {
+  const providers = CONFIG.providers || {};
+  const schedule = indicator.schedule || {};
+  if (schedule.type && schedule.type !== 'none') {
+    return providers.rules ? '' : '発表日のルール計算 (providers.rules) が無効です';
+  }
+
+  const bank = MEETING_INDICATORS[indicator.id];
+  if (bank) {
+    if (!providers.fomc) return '中央銀行の会合 (providers.fomc) が無効です';
+    if (allMeetings_(bank).length) return '';
+    const section = MEETINGS[bank] || {};
+    return '会合日程が未登録です（02_meetings.js の ' + bank + ' に追記してください'
+           + (section.verify_url ? ' / 確認先: ' + section.verify_url : '') + '）';
+  }
+
+  if (String(indicator.id).indexOf('market_') === 0) {
+    return providers.market ? '' : '休場・SQ (providers.market) が無効です';
+  }
+
+  // 発表規則も会合日程も無い。外から取ってこられるかどうかで決まる。
+  if (indicator.fred_release && providers.fred) return '';
+  if ((indicator.match || []).length && providers.investing) return '';
+  return '発表日を決める手がかりがありません'
+       + '（schedule も会合日程も無く、日付を持ってくる情報源も無効です）';
+}
+
+/** 会合日程から作られる指標と、その中央銀行。 */
+const MEETING_INDICATORS = {
+  us_fomc_rate: 'fomc', us_fomc_presser: 'fomc',
+  us_fomc_minutes: 'fomc', us_beige_book: 'fomc',
+  jp_boj_decision: 'boj', eu_ecb_decision: 'ecb',
+};
 
 /**
  * FOMC 日程の自動取得が実際にどう動くかを見る。
@@ -495,6 +565,13 @@ function dataQuality() {
     down.forEach(function (name) { lines.push('   ' + name); });
     lines.push('   → この点検結果は、その情報源ぶんが抜けた状態のものです。');
     lines.push('      （同期では、落ちた情報源ぶんの予定はカレンダーに残します）');
+  }
+
+  const unreachable = unreachableIndicators_(true);
+  if (unreachable.length) {
+    lines.push('');
+    lines.push('■ カレンダーに出しようがない指標');
+    unreachable.forEach(function (row) { lines.push('   ' + row); });
   }
 
   lines.push('');

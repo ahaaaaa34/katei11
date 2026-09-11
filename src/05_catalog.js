@@ -42,39 +42,62 @@ function indicatorsWithRules_() {
 /**
  * 外部のイベント名を指標に名寄せする。
  *
- * 名前だけでは決められない組がある（ミシガン大の速報値と確報値は、
- * サイトによっては同じ「Michigan Consumer Sentiment」で出る）。
- * その場合は発表日で見分ける。速報は第2金曜、確報は最終金曜なので、
- * どちらの発表規則に近いかで確実に判別できる。
+ * 取り違えると、他の指標の数値がカレンダーに入る。迷ったら「当てない」側に倒す。
  *
- * @param {string} name  外部サイトのイベント名
- * @param {Date=} date   その発表の日付（UTC深夜）。あれば判別に使う
+ * country が分かっているときは、**違う国の指標には絶対に当てない**。
+ * 「Chinese Manufacturing PMI」が米国の S&P グローバル PMI に当たって
+ * 中国の数値が米指標の欄に入る、という取り違えが実際に起きていた。
+ *
+ * 複数の候補が残ったときの決め方は、具体性 → 発表日の近さ、の順。
+ *  - 具体性: 当たったパターンが長い方。「ism manufacturing pmi」は
+ *    「manufacturing pmi」より具体的で、名前だけで決着がつく。
+ *  - 発表日: ミシガン大の速報値と確報値のようにパターンが同じものは、
+ *    発表規則が予想する日に近い方を採る。速報は第2金曜、確報は最終金曜。
+ *
+ * @param {string} name     外部サイトのイベント名
+ * @param {Date=} date      その発表の日付（UTC深夜）。あれば判別に使う
+ * @param {string=} country その行の国コード。あれば他国の指標を除外する
  */
-function matchEventName_(name, date) {
+function matchEventName_(name, date, country) {
   const matchers = catalog_().matchers;
   const hits = [];
   const seen = {};
   for (let i = 0; i < matchers.length; i++) {
     if (!matchers[i].re.test(name)) continue;
     const indicator = matchers[i].indicator;
-    if (seen[indicator.id]) continue;
-    seen[indicator.id] = true;
-    hits.push(indicator);
+    const length = matchers[i].len;
+    if (seen[indicator.id] !== undefined) {
+      // 同じ指標の別のパターンが当たったら、具体的な方を覚えておく。
+      hits[seen[indicator.id]].length = Math.max(hits[seen[indicator.id]].length, length);
+      continue;
+    }
+    seen[indicator.id] = hits.length;
+    hits.push({ indicator: indicator, length: length });
   }
   if (!hits.length) return null;
-  if (hits.length === 1 || !date) return hits[0];
+
+  const pool = country
+    ? hits.filter(function (hit) { return hit.indicator.country === country; })
+    : hits;
+  // 国が分かっていて、その国の指標がひとつも当たらないなら当てない。
+  if (!pool.length) return null;
+  if (pool.length === 1) return pool[0].indicator;
+
+  let widest = 0;
+  pool.forEach(function (hit) { widest = Math.max(widest, hit.length); });
+  const specific = pool.filter(function (hit) { return hit.length === widest; });
+  if (specific.length === 1 || !date) return specific[0].indicator;
 
   let best = null;
   let bestGap = Infinity;
-  hits.forEach(function (indicator) {
-    const gap = ruleDistanceDays_(indicator, date);
+  specific.forEach(function (hit) {
+    const gap = ruleDistanceDays_(hit.indicator, date);
     if (gap !== null && gap < bestGap) {
       bestGap = gap;
-      best = indicator;
+      best = hit.indicator;
     }
   });
-  // 規則で見分けられなければ、より具体的なパターン（長い方）を採る。
-  return best || hits[0];
+  return best || specific[0].indicator;
 }
 
 function matchFredRelease_(name) {

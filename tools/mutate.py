@@ -52,6 +52,17 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("名寄せで国を見ない", "src/07_providers_net.js",
+     "    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone),\n"
+     "                                      row.country);",
+     "    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone));"),
+    ("他国の指標にも当てる", "src/05_catalog.js",
+     "  if (!pool.length) return null;", "  if (!pool.length) return hits[0].indicator;"),
+    ("名寄せで具体性を見ない", "src/05_catalog.js",
+     "  const specific = pool.filter(function (hit) { return hit.length === widest; });",
+     "  const specific = pool;"),
+    ("通貨の欄を読まない", "src/07_providers_net.js",
+     "      country: investingCountry_(body),", "      country: null,"),
     ("発表のまとめを表示日だけで行う", "src/09_collect.js",
      "  const byRelease = groupMerge_(events, function (event) {\n"
      "    return releaseKey_(event, timezone);\n"

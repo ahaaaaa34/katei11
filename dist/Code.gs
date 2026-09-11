@@ -406,7 +406,7 @@ const INDICATORS = [
       exact: false
     },
     why: "当月分を月内に速報する唯一の景況感指標。ISM より2週間早く方向感が出る。",
-    match: ["s&p global .*pmi", "manufacturing pmi", "services pmi"]
+    match: ["s&p global us .*pmi", "markit us .*pmi"]
   },
   {
     id: "us_conf_board_confidence",
@@ -1441,39 +1441,62 @@ function indicatorsWithRules_() {
 /**
  * 外部のイベント名を指標に名寄せする。
  *
- * 名前だけでは決められない組がある（ミシガン大の速報値と確報値は、
- * サイトによっては同じ「Michigan Consumer Sentiment」で出る）。
- * その場合は発表日で見分ける。速報は第2金曜、確報は最終金曜なので、
- * どちらの発表規則に近いかで確実に判別できる。
+ * 取り違えると、他の指標の数値がカレンダーに入る。迷ったら「当てない」側に倒す。
  *
- * @param {string} name  外部サイトのイベント名
- * @param {Date=} date   その発表の日付（UTC深夜）。あれば判別に使う
+ * country が分かっているときは、**違う国の指標には絶対に当てない**。
+ * 「Chinese Manufacturing PMI」が米国の S&P グローバル PMI に当たって
+ * 中国の数値が米指標の欄に入る、という取り違えが実際に起きていた。
+ *
+ * 複数の候補が残ったときの決め方は、具体性 → 発表日の近さ、の順。
+ *  - 具体性: 当たったパターンが長い方。「ism manufacturing pmi」は
+ *    「manufacturing pmi」より具体的で、名前だけで決着がつく。
+ *  - 発表日: ミシガン大の速報値と確報値のようにパターンが同じものは、
+ *    発表規則が予想する日に近い方を採る。速報は第2金曜、確報は最終金曜。
+ *
+ * @param {string} name     外部サイトのイベント名
+ * @param {Date=} date      その発表の日付（UTC深夜）。あれば判別に使う
+ * @param {string=} country その行の国コード。あれば他国の指標を除外する
  */
-function matchEventName_(name, date) {
+function matchEventName_(name, date, country) {
   const matchers = catalog_().matchers;
   const hits = [];
   const seen = {};
   for (let i = 0; i < matchers.length; i++) {
     if (!matchers[i].re.test(name)) continue;
     const indicator = matchers[i].indicator;
-    if (seen[indicator.id]) continue;
-    seen[indicator.id] = true;
-    hits.push(indicator);
+    const length = matchers[i].len;
+    if (seen[indicator.id] !== undefined) {
+      // 同じ指標の別のパターンが当たったら、具体的な方を覚えておく。
+      hits[seen[indicator.id]].length = Math.max(hits[seen[indicator.id]].length, length);
+      continue;
+    }
+    seen[indicator.id] = hits.length;
+    hits.push({ indicator: indicator, length: length });
   }
   if (!hits.length) return null;
-  if (hits.length === 1 || !date) return hits[0];
+
+  const pool = country
+    ? hits.filter(function (hit) { return hit.indicator.country === country; })
+    : hits;
+  // 国が分かっていて、その国の指標がひとつも当たらないなら当てない。
+  if (!pool.length) return null;
+  if (pool.length === 1) return pool[0].indicator;
+
+  let widest = 0;
+  pool.forEach(function (hit) { widest = Math.max(widest, hit.length); });
+  const specific = pool.filter(function (hit) { return hit.length === widest; });
+  if (specific.length === 1 || !date) return specific[0].indicator;
 
   let best = null;
   let bestGap = Infinity;
-  hits.forEach(function (indicator) {
-    const gap = ruleDistanceDays_(indicator, date);
+  specific.forEach(function (hit) {
+    const gap = ruleDistanceDays_(hit.indicator, date);
     if (gap !== null && gap < bestGap) {
       bestGap = gap;
-      best = indicator;
+      best = hit.indicator;
     }
   });
-  // 規則で見分けられなければ、より具体的なパターン（長い方）を採る。
-  return best || hits[0];
+  return best || specific[0].indicator;
 }
 
 function matchFredRelease_(name) {
@@ -2254,6 +2277,7 @@ function parseInvestingRows_(html) {
     rows.push({
       datetime: match[1],
       name: name,
+      country: investingCountry_(body),
       actual: pickText_(body, /id="eventActual_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       forecast: pickText_(body, /id="eventForecast_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       previous: pickText_(body, /id="eventPrevious_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
@@ -2261,6 +2285,25 @@ function parseInvestingRows_(html) {
     });
   }
   return rows;
+}
+
+/**
+ * その行がどの国の発表か。通貨の欄（USD / EUR / CNY …）から読む。
+ *
+ * 名前だけで名寄せすると、「Chinese Manufacturing PMI」が米国の
+ * S&P グローバル PMI に当たって、中国の数値が米指標の欄に入る。
+ * 読めなかったときは null を返し、従来どおり名前だけで名寄せする
+ * （マークアップが少し変わっただけで機能ごと止まらないように）。
+ */
+const INVESTING_CURRENCY_COUNTRY = {
+  USD: 'US', JPY: 'JP', EUR: 'EU', CNY: 'CN', GBP: 'GB',
+};
+
+function investingCountry_(body) {
+  const cell = pickText_(body, /<td[^>]*class="[^"]*\bflagCur\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+  if (!cell) return null;
+  const code = (/\b([A-Z]{3})\b/.exec(cell.toUpperCase()) || [])[1];
+  return (code && INVESTING_CURRENCY_COUNTRY[code]) || null;
 }
 
 function pickText_(html, regex) {
@@ -2283,8 +2326,9 @@ function investingRowsToEvents_(rows, ctx) {
   rows.forEach(function (row) {
     const start = parseInvestingDate_(row.datetime, assumeTz);
     if (!start) return;
-    // 名前が同じ指標があるので、発表日も渡して見分けてもらう。
-    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone));
+    // 名前が同じ指標があるので、発表日と国も渡して見分けてもらう。
+    const indicator = matchEventName_(row.name, localDate_(start, ctx.timezone),
+                                      row.country);
     if (!indicator) return;
     if (!inDisplayWindow_(start, ctx)) return;
 
@@ -4156,9 +4200,17 @@ function showStatus() {
     'FRED キー    : ' + (prop_(PROP_FRED_KEY) ? '設定済み' : '未設定'),
     'Webhook      : ' + (prop_(PROP_WEBHOOK_URL) ? '設定済み' : '未設定'),
     '自動実行     : ' + countTriggers_() + ' 件',
-    '',
-    maintenanceText_(maintenanceReport_(ctx)),
   ];
+
+  const unreachable = unreachableIndicators_(false);
+  if (unreachable.length) {
+    lines.push('');
+    lines.push('この設定では出てこない指標（選抜条件は通っています）:');
+    unreachable.forEach(function (row) { lines.push('  ・ ' + row); });
+  }
+
+  lines.push('');
+  lines.push(maintenanceText_(maintenanceReport_(ctx)));
   const text = lines.join('\n');
   log_(text);
   return text;
@@ -4173,8 +4225,70 @@ function meetingCoverage_() {
     if (meeting.date > last) last = meeting.date;
     if (meeting.confidence === 'official') verified++;
   });
-  return last + ' まで / 公式と照合済み ' + verified + ' 件中 ' + meetings.length + ' 件';
+  return last + ' まで / ' + meetings.length + ' 件中 ' + verified + ' 件が公式と照合済み';
 }
+
+/**
+ * 「カタログには載っているのに、いまの設定では絶対に出てこない指標」。
+ *
+ * いちばん気づきにくい壊れ方は、エラーも出ず、ただ永久に出てこないこと。
+ * 日銀の会合を待っていたのに 02_meetings.js が空のまま、というのがその例。
+ * 選抜条件を通るのに出しようが無いものは、理由を添えて挙げておく。
+ *
+ * all を true にすると、選抜条件で外れているものも含めて全部返す。
+ */
+function unreachableIndicators_(all) {
+  const rows = [];
+  INDICATORS.forEach(function (indicator) {
+    if (!all && !selectedByFilter_(indicator)) return;
+    const why = whyUnreachable_(indicator);
+    if (why) rows.push(indicator.name + ' — ' + why);
+  });
+  return rows;
+}
+
+/** その指標が、いまの選抜条件を通るか（発表日の有無は見ない）。 */
+function selectedByFilter_(indicator) {
+  return applyFilter_([{
+    indicatorId: indicator.id, impact: indicator.impact,
+    country: indicator.country, category: indicator.category,
+  }]).length > 0;
+}
+
+/** 出てこない理由。出てくるなら空文字。 */
+function whyUnreachable_(indicator) {
+  const providers = CONFIG.providers || {};
+  const schedule = indicator.schedule || {};
+  if (schedule.type && schedule.type !== 'none') {
+    return providers.rules ? '' : '発表日のルール計算 (providers.rules) が無効です';
+  }
+
+  const bank = MEETING_INDICATORS[indicator.id];
+  if (bank) {
+    if (!providers.fomc) return '中央銀行の会合 (providers.fomc) が無効です';
+    if (allMeetings_(bank).length) return '';
+    const section = MEETINGS[bank] || {};
+    return '会合日程が未登録です（02_meetings.js の ' + bank + ' に追記してください'
+           + (section.verify_url ? ' / 確認先: ' + section.verify_url : '') + '）';
+  }
+
+  if (String(indicator.id).indexOf('market_') === 0) {
+    return providers.market ? '' : '休場・SQ (providers.market) が無効です';
+  }
+
+  // 発表規則も会合日程も無い。外から取ってこられるかどうかで決まる。
+  if (indicator.fred_release && providers.fred) return '';
+  if ((indicator.match || []).length && providers.investing) return '';
+  return '発表日を決める手がかりがありません'
+       + '（schedule も会合日程も無く、日付を持ってくる情報源も無効です）';
+}
+
+/** 会合日程から作られる指標と、その中央銀行。 */
+const MEETING_INDICATORS = {
+  us_fomc_rate: 'fomc', us_fomc_presser: 'fomc',
+  us_fomc_minutes: 'fomc', us_beige_book: 'fomc',
+  jp_boj_decision: 'boj', eu_ecb_decision: 'ecb',
+};
 
 /**
  * FOMC 日程の自動取得が実際にどう動くかを見る。
@@ -4269,6 +4383,13 @@ function dataQuality() {
     down.forEach(function (name) { lines.push('   ' + name); });
     lines.push('   → この点検結果は、その情報源ぶんが抜けた状態のものです。');
     lines.push('      （同期では、落ちた情報源ぶんの予定はカレンダーに残します）');
+  }
+
+  const unreachable = unreachableIndicators_(true);
+  if (unreachable.length) {
+    lines.push('');
+    lines.push('■ カレンダーに出しようがない指標');
+    unreachable.forEach(function (row) { lines.push('   ' + row); });
   }
 
   lines.push('');

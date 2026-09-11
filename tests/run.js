@@ -1228,6 +1228,43 @@ suite('診断コマンド', () => {
     ok(api.checkFomcAutoFetch().indexOf('取得できませんでした') !== -1);
   });
 
+  test('出しようがない指標を、理由つきで挙げる', () => {
+    const api = loadGas({ Calendar: fakeCalendar(), ScriptApp: fakeScriptApp() });
+    Object.assign(api.CONFIG.providers,
+      { fred: false, earnings: false, investing: false, fomcAutoFetch: false });
+
+    const rows = api.unreachableIndicators_(true);
+    const text = rows.join('\n');
+    // 会合日程が空のままだと、日銀も ECB も永久に出てこない。
+    ok(text.indexOf('日銀') !== -1, text);
+    ok(text.indexOf('02_meetings.js') !== -1, 'どこを直せばよいか書いてあること');
+    ok(text.indexOf('boj.or.jp') !== -1, '確認先の URL が載っていること');
+    // 発表規則を持つ指標は、ここに挙がってはいけない。
+    ok(text.indexOf('消費者物価指数') === -1, text);
+
+    ok(api.showStatus().indexOf('この設定では出てこない指標') !== -1);
+  });
+
+  test('会合日程を入れれば、出てこない扱いから外れる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    Object.assign(api.CONFIG.providers, { fomcAutoFetch: false });
+    ok(api.whyUnreachable_(api.indicator_('jp_boj_decision')) !== '');
+    api.MEETINGS.boj.meetings.push({ date: '2026-09-18', sep: false });
+    eq(api.whyUnreachable_(api.indicator_('jp_boj_decision')), '');
+    api.MEETINGS.boj.meetings.pop();
+  });
+
+  test('情報源を切ると、その理由が出る', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.providers.rules = false;
+    ok(api.whyUnreachable_(api.indicator_('us_cpi')).indexOf('providers.rules') !== -1);
+    api.CONFIG.providers.rules = true;
+    eq(api.whyUnreachable_(api.indicator_('us_cpi')), '');
+
+    api.CONFIG.providers.market = false;
+    ok(api.whyUnreachable_(api.indicator_('market_holiday')).indexOf('providers.market') !== -1);
+  });
+
   test('showStatus は日程の出所を分けて表示する', () => {
     const api = loadGas({
       ScriptApp: fakeScriptApp(),
@@ -1236,7 +1273,7 @@ suite('診断コマンド', () => {
       },
     });
     const text = api.showStatus();
-    ok(/2027-\d{2}-\d{2} まで \/ 公式と照合済み \d+ 件中 \d+ 件/.test(text), text);
+    ok(/2027-\d{2}-\d{2} まで \/ \d+ 件中 \d+ 件が公式と照合済み/.test(text), text);
     ok(text.indexOf('fomcAutoFetch') === -1, '挙動スイッチを情報源として並べない');
   });
 });
@@ -1761,6 +1798,32 @@ suite('Investing プロバイダ（有効時の全経路）', () => {
 
   test('応答が JSON でなければ空で返す（落ちない）', () => {
     eq(serving('<html>maintenance</html>').providerInvesting_(ctx), []);
+  });
+
+  test('他の国の行を、米国の指標として取り込まない', () => {
+    // 設定上 EU や中国も問い合わせるので、応答には他国の行が混ざる。
+    // 名前だけで名寄せすると、ユーロ圏の CPI が米 CPI の欄に入る。
+    const mixed = [
+      '<tr data-event-datetime="2026/09/11 09:00:00">'
+      + '<td class="left flagCur noWrap">EUR</td>'
+      + '<td class="left event">Core CPI (MoM)</td>'
+      + '<td id="eventActual_1">9.9%</td></tr>',
+      '<tr data-event-datetime="2026/09/11 01:30:00">'
+      + '<td class="left flagCur noWrap">CNY</td>'
+      + '<td class="left event">Chinese Manufacturing PMI</td>'
+      + '<td id="eventActual_2">49.5</td></tr>',
+      ROW_HTML,
+    ].join('');
+    const api = serving(JSON.stringify({ data: mixed }));
+    api.CONFIG.filter.minImpact = 0;
+    const events = api.providerInvesting_(ctx);
+    const cpi = events.filter((e) => e.indicatorId === 'us_cpi');
+    eq(cpi.length, 1, '米 CPI はひとつだけ');
+    eq(cpi[0].actual, '0.2%', 'ユーロ圏の数値が入っていないこと');
+    ok(events.every((e) => e.indicatorId !== 'us_spglobal_pmi_flash'),
+       '中国 PMI が米 PMI として入っていないこと');
+    eq(events.filter((e) => e.indicatorId === 'cn_pmi').length, 1,
+       '中国 PMI は中国の指標として入ること');
   });
 
   test('data が無くても落ちない', () => {
@@ -2851,6 +2914,95 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
     eq(K(api.localDate_(shown[0].start, 'Asia/Tokyo')), '2026-09-11',
        'カレンダーにある方が一覧に出ること');
     eq(shown[0].confidence, 'official');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('発表名の名寄せ（取り違えると他国・他指標の数値が入る）', () => {
+  const api = loadGas({ Calendar: fakeCalendar() });
+  const day = Y(2026, 9, 11);
+
+  test('他の国の同名指標に当てない', () => {
+    // ユーロ圏の CPI が米 CPI の欄に入ると、カレンダーの数字が丸ごと嘘になる。
+    eq(api.matchEventName_('Core CPI (MoM)', day, 'US').id, 'us_cpi');
+    eq(api.matchEventName_('Core CPI (MoM)', day, 'EU'), null);
+    eq(api.matchEventName_('S&P Global Eurozone Manufacturing PMI', day, 'EU'), null);
+    eq(api.matchEventName_('Chinese Manufacturing PMI', day, 'CN').id, 'cn_pmi');
+    eq(api.matchEventName_('BoJ Interest Rate Decision', day, 'JP').id, 'jp_boj_decision');
+    eq(api.matchEventName_('ECB Interest Rate Decision', day, 'EU').id, 'eu_ecb_decision');
+  });
+
+  test('国が分からなくても、具体的な方を採る', () => {
+    // 「ism manufacturing pmi」は「manufacturing pmi」より具体的。
+    eq(api.matchEventName_('ISM Manufacturing PMI', day).id, 'us_ism_mfg');
+    eq(api.matchEventName_('Chinese Manufacturing PMI', day).id, 'cn_pmi');
+    eq(api.matchEventName_('ISM Non-Manufacturing PMI', day).id, 'us_ism_services');
+  });
+
+  test('名前が同じものは、発表日で見分ける', () => {
+    eq(api.matchEventName_('Michigan Consumer Sentiment', Y(2026, 9, 11), 'US').id,
+       'us_umich_prelim', '第2金曜は速報値');
+    eq(api.matchEventName_('Michigan Consumer Sentiment', Y(2026, 9, 25), 'US').id,
+       'us_umich_final', '最終金曜は確報値');
+  });
+
+  test('同じ発表に含まれる項目は、その発表に寄せる', () => {
+    // 雇用統計は失業率も平均時給も同じ 8:30 の発表。別々の予定にしない。
+    ['Nonfarm Payrolls', 'Unemployment Rate', 'Average Hourly Earnings (MoM)']
+      .forEach((name) => eq(api.matchEventName_(name, day, 'US').id, 'us_nfp', name));
+    ['Housing Starts', 'Building Permits']
+      .forEach((name) => eq(api.matchEventName_(name, day, 'US').id,
+                            'us_housing_starts', name));
+    ['Core PCE Price Index (MoM)', 'Personal Spending (MoM)']
+      .forEach((name) => eq(api.matchEventName_(name, day, 'US').id, 'us_pce', name));
+  });
+
+  test('緩いパターンより、具体的なパターンを優先する', () => {
+    // カタログに緩いパターンを足してしまっても、より具体的な方が勝つこと。
+    const loose = loadGas({ Calendar: fakeCalendar() });
+    loose.INDICATORS.push({ id: 'x_loose', name: 'ざっくり PMI', country: 'US',
+                            category: 'survey', impact: 60, time: '10:00',
+                            // 発表日はわざとこの題材の日そのものにする。
+                            // 「日付の近さ」だけで決めると、こちらが勝ってしまう。
+                            schedule: { type: 'day_of_month', day: 11 },
+                            match: ['pmi'] });
+    // 名寄せの索引は初回参照時に作られるので、この読み込みではまだ空。
+    // 足した指標もそのまま索引に入る。
+    const hit = loose.matchEventName_('ISM Manufacturing PMI', day, 'US');
+    eq(hit.id, 'us_ism_mfg',
+       '名前で決着がつくなら、日付の近さより名前の具体性を優先すること');
+    eq(loose.matchEventName_('Some Other PMI', day, 'US').id, 'x_loose',
+       '具体的なパターンが当たらなければ、緩い方に落ちる');
+    loose.INDICATORS.pop();
+  });
+
+  test('カタログに無いものには当てない', () => {
+    ['3-Year Note Auction', 'Fed Monetary Policy Report', 'ISM Manufacturing Prices',
+     'Chinese Non-Manufacturing PMI', 'まったく関係のない行']
+      .forEach((name) => eq(api.matchEventName_(name, day, 'US'), null, name));
+  });
+
+  test('通貨の欄から国を読む', () => {
+    const cell = '<td class="left flagCur noWrap">'
+      + '<span title="United States" class="ceFlags United_States">&nbsp;</span>USD</td>';
+    eq(api.investingCountry_(cell), 'US');
+    eq(api.investingCountry_('<td class="flagCur">CNY</td>'), 'CN');
+    eq(api.investingCountry_('<td class="flagCur">EUR</td>'), 'EU');
+    eq(api.investingCountry_('<td class="flagCur">CHF</td>'), null, '知らない通貨は当てない');
+    eq(api.investingCountry_('<td class="left event">CPI</td>'), null,
+       '欄が無ければ null（名前だけの名寄せに戻る）');
+  });
+
+  test('取得した行の国が、名寄せに効いている', () => {
+    const rows = api.parseInvestingRows_(
+      '<tr data-event-datetime="2026/09/11 09:00:00">'
+      + '<td class="left flagCur noWrap">CNY</td>'
+      + '<td class="left event">Chinese Manufacturing PMI</td>'
+      + '<td id="eventActual_1">49.5</td></tr>');
+    eq(rows.length, 1);
+    eq(rows[0].country, 'CN');
+    eq(api.matchEventName_(rows[0].name, day, rows[0].country).id, 'cn_pmi',
+       '中国の数値が米指標の欄に入らないこと');
   });
 });
 
