@@ -3972,7 +3972,7 @@ function buildPlan_(calendarId, events, existing, ctx) {
     const current = byId[resource.id];
     if (!current) {
       plan.created.push({ event: event, resource: resource });
-    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {
+    } else if (matchesCalendar_(current, resource)) {
       plan.unchanged.push(event);
     } else {
       plan.updated.push({ event: event, resource: resource });
@@ -4024,6 +4024,38 @@ function inPruneRange_(item, ctx) {
 function storedHash_(item) {
   const props = (item.extendedProperties && item.extendedProperties.private) || {};
   return props.hash || null;
+}
+
+/**
+ * カレンダーにあるものが、書き込みたい内容と一致しているか。
+ *
+ * 前回書いた内容のハッシュだけを見ていると、**カレンダー側で中身が
+ * 書き換わったことに気づけない**。人が件名を手で直した予定は、間違った
+ * ままいつまでも残る（このカレンダーは指標の値そのものなので、手で
+ * 直された件名が残るのは「嘘が残る」のと同じ）。
+ *
+ * そこで、ハッシュに加えて **人の目に映る2つ** を実物と直接くらべる。
+ *
+ *   件名   … そのまま文字列でくらべる
+ *   開始   … Google は送った形と違う書き方（+09:00 など）で返してくるので、
+ *            文字列ではなく瞬間としてくらべる。ここを文字列でくらべると
+ *            毎回「違う」と判定され、更新が走り続ける
+ *
+ * 説明文は長く、Google 側で整形されうるのでくらべない。
+ */
+function matchesCalendar_(item, resource) {
+  if (storedHash_(item) !== resource.extendedProperties.private.hash) return false;
+  if (String(item.summary || '') !== String(resource.summary || '')) return false;
+  return sameMoment_(item.start, resource.start) && sameMoment_(item.end, resource.end);
+}
+
+function sameMoment_(a, b) {
+  const left = a || {};
+  const right = b || {};
+  if (left.date || right.date) return left.date === right.date;
+  const at = new Date(left.dateTime || 0).getTime();
+  const bt = new Date(right.dateTime || 0).getTime();
+  return !isNaN(at) && !isNaN(bt) && at === bt;
 }
 
 function planSummary_(plan) {

@@ -53,6 +53,14 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("カレンダー側の書き換えに気づかない", "src/11_sync.js",
+     "    } else if (matchesCalendar_(current, resource)) {",
+     "    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {"),
+    ("開始時刻を文字列でくらべる", "src/11_sync.js",
+     "  const at = new Date(left.dateTime || 0).getTime();\n"
+     "  const bt = new Date(right.dateTime || 0).getTime();\n"
+     "  return !isNaN(at) && !isNaN(bt) && at === bt;",
+     "  return left.dateTime === right.dateTime;"),
     ("日程の検査で、読めない日付を黙って通す", "src/08_fomc_auto.js",
      "    if (!date) return '日付として読めない: ' + key;", "    if (!date) return;"),
     ("翌年から落ちてくる振替休日を数えない", "src/04_schedule.js",

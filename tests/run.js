@@ -2947,6 +2947,171 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 7周目: 同期のあらゆる地点で失敗させ、カレンダー側を人の手で変えた結果。
+// ---------------------------------------------------------------------------
+suite('カレンダー側で書き換えられた予定を、正しい姿に戻す', () => {
+  function seeded() {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const make = () => {
+      const api = loadGas({
+        Calendar: calendar, properties: store,
+        UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                       fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                         getContentText: () => '' })) },
+      });
+      Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                            fomcAutoFetch: false, officialTimes: false });
+      api.CONFIG.window.daysAhead = 20;
+      api.CONFIG.window.daysBack = 5;
+      return api;
+    };
+    make().syncCalendar();
+    return { calendar, store, make };
+  }
+
+  test('件名を手で直されたら、次の同期で戻す', () => {
+    // 前回書いた内容のハッシュだけを見ていると、カレンダー側で書き換わった
+    // ことに気づけない。このカレンダーは指標そのものなので、手で直された
+    // 件名が残るのは「嘘が残る」のと同じ。
+    const { calendar, make } = seeded();
+    const id = [...calendar.events.keys()][0];
+    const want = calendar.events.get(id).summary;
+    calendar.events.get(id).summary = '人が書き換えた件名';
+
+    const plan = make().syncCalendar();
+    eq(calendar.events.get(id).summary, want, '元の件名に戻ること');
+    ok(plan.updated.length >= 1, '更新として扱うこと');
+  });
+
+  test('時刻を手で動かされたら、次の同期で戻す', () => {
+    const { calendar, make } = seeded();
+    const id = [...calendar.events.keys()].find(
+      (k) => calendar.events.get(k).start.dateTime);
+    const want = calendar.events.get(id).start.dateTime;
+    calendar.events.get(id).start.dateTime = '2026-09-11T03:00:00.000Z';
+
+    make().syncCalendar();
+    eq(new Date(calendar.events.get(id).start.dateTime).getTime(),
+       new Date(want).getTime(), '元の時刻に戻ること');
+  });
+
+  test('Google が別の書き方で返してきても、更新は走らない', () => {
+    // Google は送った Z 形式ではなく +09:00 のような書き方で返す。
+    // ここを文字列でくらべると、毎回「違う」と判定されて更新が走り続ける。
+    const { calendar, make } = seeded();
+    calendar.events.forEach((e) => {
+      if (!e.start.dateTime) return;
+      const shift = (iso) => new Date(new Date(iso).getTime() + 9 * 3600000)
+        .toISOString().replace('Z', '+09:00');
+      e.start.dateTime = shift(e.start.dateTime);
+      e.end.dateTime = shift(e.end.dateTime);
+    });
+    const plan = make().syncCalendar();
+    eq(plan.created.length + plan.updated.length + plan.deleted.length, 0,
+       '書き込みが起きないこと');
+  });
+
+  test('このツールが作っていない予定には触らない', () => {
+    const { calendar, make } = seeded();
+    calendar.events.set('someone-elses', {
+      id: 'someone-elses', summary: '他人の予定',
+      start: { dateTime: '2026-09-12T01:00:00.000Z' },
+      end: { dateTime: '2026-09-12T02:00:00.000Z' },
+      extendedProperties: { private: {} },
+    });
+    make().syncCalendar();
+    ok(calendar.events.has('someone-elses'), '消さないこと');
+    eq(calendar.events.get('someone-elses').summary, '他人の予定', '書き換えないこと');
+  });
+
+  test('目印を外された予定も、管理下に戻す', () => {
+    const { calendar, make } = seeded();
+    const id = [...calendar.events.keys()][1];
+    calendar.events.get(id).extendedProperties.private.ecal = '0';
+    make().syncCalendar();
+    eq((calendar.events.get(id).extendedProperties.private || {}).ecal, '1');
+    // 同じ ID を使い回すので、重複はできない
+    const same = [...calendar.events.values()].filter((e) => e.id === id);
+    eq(same.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('どこで失敗しても、次の回で正しい姿に収束する', () => {
+  function net() {
+    return { fetch: () => { throw new Error('down'); },
+             fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                               getContentText: () => '' })) };
+  }
+  function make(calendar, store) {
+    const api = loadGas({ Calendar: calendar, properties: store, UrlFetchApp: net() });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 20;
+    api.CONFIG.window.daysBack = 5;
+    return api;
+  }
+  const snapshot = (calendar) => [...calendar.events.values()]
+    .map((e) => [e.id, e.summary, JSON.stringify(e.start),
+                 (e.extendedProperties.private || {}).hash].join('|')).sort().join('\n');
+
+  test('書き込みの途中で落ちても、壊れたまま残らない', () => {
+    // 正解の姿を先に作る
+    const cleanCal = fakeCalendar();
+    const cleanStore = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(cleanCal, cleanStore).syncCalendar();
+    const want = snapshot(cleanCal);
+
+    const ERRORS = ['API call failed with error: Rate Limit Exceeded',
+                    'API call failed with error: Forbidden', 'なにか未知の失敗'];
+    [1, 3, 7, 15, 25].forEach((failAt) => {
+      ERRORS.forEach((text) => {
+        const calendar = fakeCalendar();
+        let n = 0;
+        ['insert', 'update', 'remove'].forEach((name) => {
+          const original = calendar.Events[name];
+          calendar.Events[name] = function () {
+            if (++n === failAt) throw new Error(text);
+            return original.apply(this, arguments);
+          };
+        });
+        const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+        try { make(calendar, store).syncCalendar(); } catch (err) { /* 落ちてよい */ }
+
+        // 途中まで書いたものが壊れて残っていないこと
+        calendar.events.forEach((item) => {
+          const props = (item.extendedProperties || {}).private || {};
+          ok(props.ecal === '1', '目印の無い予定が残った: ' + item.id);
+          ok(!!props.hash, '内容ハッシュの無い予定が残った: ' + item.id);
+          ok(!!item.summary, '件名の無い予定が残った: ' + item.id);
+        });
+
+        // 正常に戻したら、落ちなかった場合と同じ姿になること
+        const healthy = fakeCalendar({ events: Object.fromEntries(calendar.events) });
+        make(healthy, store).syncCalendar();
+        const plan = make(healthy, store).syncCalendar();
+        eq(plan.created.length + plan.updated.length + plan.deleted.length, 0,
+           failAt + '回目で「' + text + '」→ 落ち着かない');
+        eq(snapshot(healthy), want, failAt + '回目で「' + text + '」→ 姿が違う');
+      });
+    });
+  });
+
+  test('一覧が読めないときは、何も書き換えない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(calendar, store).syncCalendar();
+    const before = snapshot(calendar);
+    calendar.Events.list = () => {
+      throw new Error('API call failed with error: Internal error');
+    };
+    throws(() => make(calendar, store).syncCalendar(), 'Internal error');
+    eq(snapshot(calendar), before, '読めないのに書きに行かないこと');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 6周目: 境界を1つずつ、両側から突いた結果。
 // ---------------------------------------------------------------------------
 suite('境界: 日程の検査は、必ず理由を返すか null を返す', () => {
