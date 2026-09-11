@@ -8,6 +8,7 @@
 import atexit
 import re
 import signal
+import os
 import subprocess
 import sys
 
@@ -118,7 +119,8 @@ MUTATIONS = [
     ("弱い予定でも既存を上書きする", "src/11_sync.js",
      "      if (nearby[i].rank <= mine) continue;", "      if (true) continue;"),
     ("名寄せで発表日を見ない", "src/05_catalog.js",
-     "  if (hits.length === 1 || !date) return hits[0];", "  return hits[0];"),
+     "  if (specific.length === 1 || !date) return specific[0].indicator;",
+     "  return specific[0].indicator;"),
     ("根拠を指定し忘れたら official に倒す", "src/05_catalog.js",
      "    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',",
      "    confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'official',"),
@@ -141,9 +143,16 @@ MUTATIONS = [
 RESULT = re.compile(r"(\d+) passed, (\d+) failed")
 
 
-def run_tests(timeout=120):
+# 性質テストは件数を減らして回す。44 通りの変異それぞれで 90 件を
+# 回すと 20 分を超えてしまう。変異の検出に必要なのは「性質が破れること」
+# であって件数ではないので、ここでは少なめにする。
+FUZZ_CASES = os.environ.get("MUTATE_FUZZ_N", "20")
+
+
+def run_tests(timeout=180):
+    env = dict(os.environ, FUZZ_N=FUZZ_CASES)
     try:
-        proc = subprocess.run(["node", "tests/run.js"],
+        proc = subprocess.run(["node", "tests/run.js"], env=env,
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, "時間内に終わらなかった"
@@ -175,7 +184,21 @@ def install_signal_guards(originals):
             pass
 
 
+def selected(argv):
+    """引数があれば、名前に含まれるものだけを回す（部分一致）。"""
+    if not argv:
+        return MUTATIONS
+    picked = [m for m in MUTATIONS if any(word in m[0] for word in argv)]
+    if not picked:
+        print("その名前の変異はありません: " + ", ".join(argv))
+    return picked
+
+
 def main():
+    targets = selected(sys.argv[1:])
+    if not targets:
+        return 1
+
     # 途中で強制終了されても作業ツリーを汚さない。finally だけでは
     # SIGKILL に対応できないので、git でも復元できることを確かめておく。
     dirty = subprocess.run(["git", "diff", "--quiet", "--", "src"]).returncode != 0
@@ -190,7 +213,7 @@ def main():
     print(f"変異前: {summary}\n")
 
     originals = {}
-    for _, path, _, _ in MUTATIONS:
+    for _, path, _, _ in targets:
         originals.setdefault(path, open(path, encoding="utf-8").read())
     # 例外でも Ctrl-C でも、確実に書き戻す
     atexit.register(restore_all, originals)
@@ -198,7 +221,7 @@ def main():
 
     missed = []
     try:
-        for name, path, old, new in MUTATIONS:
+        for name, path, old, new in targets:
             source = originals[path]
             if old not in source:
                 print(f"⚠️  対象コードが見つからない  {name}")
@@ -221,7 +244,7 @@ def main():
     if missed:
         print(f"{len(missed)} 件の修正がテストで守られていません: " + ", ".join(missed))
         return 1
-    print(f"全 {len(MUTATIONS)} 件の修正が回帰テストで守られています")
+    print(f"全 {len(targets)} 件の修正が回帰テストで守られています")
     return 0
 
 

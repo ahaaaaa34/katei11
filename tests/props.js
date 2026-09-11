@@ -382,7 +382,7 @@ function registerPropertyTests(env) {
     // 続けて、時間や設定を動かしたときの性質も同じやり方で見る。
     // -----------------------------------------------------------------------
     const next2 = rng(SEED ^ 0x5bf03635);
-    const MOVING = Math.max(8, Math.floor(CASES / 6));
+    const MOVING = Math.max(2, Math.floor(CASES / 6));
 
     for (let i = 0; i < MOVING; i++) {
       const spec = draw(next2);
@@ -453,7 +453,7 @@ function registerPropertyTests(env) {
 
     // --- 基準日を1日ずつ進めても、無駄な書き換えが起きない ---
     const next3 = rng(SEED ^ 0x1d872b41);
-    const SLIDING = Math.max(4, Math.floor(CASES / 12));
+    const SLIDING = Math.max(1, Math.floor(CASES / 12));
     for (let i = 0; i < SLIDING; i++) {
       const spec = draw(next3);
       spec.up = { fred: true, investing: true, earnings: true, fomc: true };
