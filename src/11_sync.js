@@ -323,16 +323,26 @@ function keepStrongerExisting_(events, existing) {
     if (!nearby) return true;
     const day = localDate_(event.start, CONFIG.timezone);
     const mine = confidenceRank_(event.confidence);
+
+    // **いちばん近いもの**を選ぶ。最初に見つかったものを採ると、週次の指標で
+    // 隣の週を掴んでしまう（失業保険は毎週なので、12日以内に別の週がいる）。
+    // 掴み違えると、守るつもりの無い予定を守り、守るべき予定を消す。
+    let best = null;
     for (let i = 0; i < nearby.length; i++) {
       if (nearby[i].rank <= mine) continue;
-      if (Math.abs(daysBetween_(day, nearby[i].day)) > SUPERSEDE_WINDOW_DAYS) continue;
-      log_(event.indicatorId + ': より確かな予定が既にあるので、'
-           + dateKey_(day) + ' の弱い予定は作りません');
-      keptIds[nearby[i].id] = true;
-      replaced.push(nearby[i].id);
-      return false;
+      const gap = Math.abs(daysBetween_(day, nearby[i].day));
+      if (gap > SUPERSEDE_WINDOW_DAYS) continue;
+      if (!best || gap < best.gap) best = { gap: gap, anchor: nearby[i] };
     }
-    return true;
+    if (!best) return true;
+
+    log_(event.indicatorId + ': より確かな予定が既にあるので、'
+         + dateKey_(day) + ' の弱い予定は作りません');
+    if (!keptIds[best.anchor.id]) {
+      keptIds[best.anchor.id] = true;
+      replaced.push(best.anchor.id);   // 同じものを二度並べない
+    }
+    return false;
   });
   return { events: kept, keptIds: keptIds, replaced: replaced };
 }

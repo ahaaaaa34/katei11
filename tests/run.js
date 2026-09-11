@@ -2947,6 +2947,198 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 8周目: コードを1行ずつ読んで見つけたもの。
+// ---------------------------------------------------------------------------
+suite('SQ は、市場が閉まっている日に置かない', () => {
+  // オプションの満期は原則そのうきの第3金曜だが、その日が休場なら前営業日に
+  // 繰り上がる。2026-06-19（ジューンティーンス）が実際にそれに当たる。
+  test('第3金曜が休場なら、前営業日に繰り上げる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [[2025, 4, '2025-04-17'], [2026, 6, '2026-06-18'], [2027, 6, '2027-06-17'],
+     [2030, 4, '2030-04-18'], [2033, 4, '2033-04-14']].forEach((row) => {
+      eq(K(api.expiryDay_(row[0], row[1])), row[2], row[0] + '-' + row[1]);
+    });
+  });
+
+  test('ふつうの月は第3金曜のまま', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [[2026, 3, '2026-03-20'], [2026, 9, '2026-09-18'], [2026, 12, '2026-12-18']]
+      .forEach((row) => eq(K(api.expiryDay_(row[0], row[1])), row[2]));
+  });
+
+  test('満期日が休場と重ならない（20年ぶん）', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    for (let y = 2024; y <= 2044; y++) {
+      const holidays = api.marketHolidays_(y);
+      for (let m = 1; m <= 12; m++) {
+        const day = api.expiryDay_(y, m);
+        ok(!holidays[K(day)], K(day) + ' は休場');
+        ok(api.weekdayOf_(day) < 5, K(day) + ' は週末');
+      }
+    }
+  });
+
+  test('カレンダーに入る SQ も繰り上がっている', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.filter.minImpact = 0;
+    const ctx = { start: Y(2026, 6, 1), end: Y(2026, 6, 30), timezone: 'Asia/Tokyo' };
+    const quad = api.providerMarket_(ctx).find(
+      (e) => e.indicatorId === 'market_quad_witching');
+    ok(quad, 'クアドラプル・ウィッチングが出ること');
+    eq(K(api.localDate_(quad.start, 'America/New_York')), '2026-06-18',
+       'ジューンティーンス（6/19）ではなく前日に置くこと');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('据え置きの相手は、いちばん近いものを選ぶ', () => {
+  function weekly(api, day, confidence, source) {
+    return api.makeEvent_({
+      indicatorId: 'us_jobless_claims', title: '米 新規失業保険申請件数', impact: 75,
+      source: source, confidence: confidence,
+      start: api.zonedTime_(Y(2026, 9, day), '08:30', 'America/New_York'),
+      end: api.zonedTime_(Y(2026, 9, day), '08:45', 'America/New_York'),
+    });
+  }
+  function stored(api, events) {
+    return events.map((e) => {
+      const r = api.toCalendarResource_(e);
+      return { id: r.id, summary: r.summary, start: r.start, end: r.end,
+               extendedProperties: r.extendedProperties };
+    });
+  }
+
+  test('毎週の指標で、隣の週を掴まない', () => {
+    // 失業保険は毎週なので、12日以内に必ず別の週がいる。最初に見つかった
+    // ものを採ると隣の週を守ってしまい、守るべき方の予定が消える。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const existing = stored(api, [4, 11, 18, 25].map(
+      (d) => weekly(api, d, 'official', 'fred')));
+    const fresh = [3, 10, 17, 24].map((d) => weekly(api, d, 'rule', 'rules'));
+
+    const guarded = api.keepStrongerExisting_(fresh, existing);
+    eq(guarded.events.length, 0, '弱い方は全部捨てる');
+    eq(Object.keys(guarded.keptIds).length, 4, '公式の4週ぶんすべてを守ること');
+
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    const plan = api.buildPlan_('c', fresh, existing, ctx);
+    eq(plan.deleted.length, 0, '1件も消さないこと');
+  });
+
+  test('同じものを二度「据え置き」と数えない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const existing = stored(api, [[10, 'official']].map(
+      (r) => weekly(api, r[0], r[1], 'fred')));
+    const fresh = [9, 11].map((d) => weekly(api, d, 'rule', 'rules'));
+    const guarded = api.keepStrongerExisting_(fresh, existing);
+    eq(guarded.replaced.length, new Set(guarded.replaced).size,
+       'まとめの一覧に同じ予定が二度出ないこと');
+    eq(api.displayEvents_(fresh, existing).length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('知らせと表示が、静かに嘘をつかない', () => {
+  function ready(overrides) {
+    const api = loadGas(Object.assign({
+      Calendar: fakeCalendar(),
+      properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) },
+    }, overrides));
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    return api;
+  }
+
+  test('通知の控えが保存できなくても、同期は成功のまま', () => {
+    // ここで例外が漏れると、カレンダーは正しく書けているのに
+    // 「同期に失敗しました」というメールが飛ぶ。
+    const api = ready({});
+    api.MEETINGS.fomc.meetings = [{ date: '2026-09-20', sep: false }];
+    const real = api._stubs.PropertiesService.getScriptProperties();
+    api._stubs.PropertiesService.getScriptProperties = () => ({
+      getProperty: (k) => real.getProperty(k),
+      setProperty: (k, v) => {
+        if (k === '_lastMaintenanceMail') throw new Error('書けません');
+        return real.setProperty(k, v);
+      },
+      deleteProperty: (k) => real.deleteProperty(k),
+    });
+    const plan = api.syncCalendar();
+    ok(plan && plan.created.length > 0, '同期そのものは成功すること');
+  });
+
+  test('確認先の URL が無くても「undefined」と書かない', () => {
+    const api = ready({});
+    delete api.MEETINGS.fomc.verify_url;
+    api.MEETINGS.fomc.meetings = [{ date: '2026-09-20', sep: false }];
+    const text = api.maintenanceText_(api.maintenanceReport_(api.syncWindow_()));
+    ok(text.indexOf('undefined') === -1, text);
+  });
+
+  test('preview の凡例が、実際の表示と合っている', () => {
+    const api = ready({});
+    const text = api.preview();
+    ok(text.indexOf('~ 印') === -1, '使っていない記号を説明しないこと');
+    if (text.indexOf('(日付未確定)') !== -1) {
+      ok(text.indexOf('「(日付未確定)」は') !== -1, '出ている印を説明すること');
+    }
+  });
+
+  test('設定が壊れていても showStatus は落ちず、理由を出す', () => {
+    // 困ったときに見る画面なので、ここで落ちては元も子もない。
+    const api = ready({});
+    api.CONFIG.timezone = 'Nowhere/Nothing';
+    const text = api.showStatus();
+    ok(text.indexOf('timezone') !== -1, text);
+
+    const api2 = ready({});
+    api2.CONFIG.filter.minImpact = 'ななじゅう';
+    ok(api2.showStatus().indexOf('minImpact') !== -1);
+  });
+
+  test('週次まとめは、月曜の午前に何度走らせても1回だけ', () => {
+    const posts = [];
+    const monday = Date.UTC(2026, 8, 13, 22, 0);   // 9/14(月) 07:00 JST
+    const RealDate = Date;
+    function FakeDate(...args) {
+      if (!(this instanceof FakeDate)) return new RealDate(monday).toString();
+      return args.length ? new RealDate(...args) : new RealDate(monday);
+    }
+    FakeDate.prototype = RealDate.prototype;
+    FakeDate.now = () => monday;
+    FakeDate.UTC = RealDate.UTC;
+    FakeDate.parse = RealDate.parse;
+    global.Date = FakeDate;
+    try {
+      const api = ready({
+        properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)',
+                      WEBHOOK_URL: 'https://example.com/hook' },
+        UrlFetchApp: {
+          fetch: (url, params) => {
+            if (String(url).indexOf('example.com') !== -1) {
+              posts.push(String((params && params.payload) || ''));
+              return { getResponseCode: () => 200, getContentText: () => 'ok' };
+            }
+            throw new Error('down');
+          },
+          fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                            getContentText: () => '' })),
+        },
+      });
+      api.syncCalendar();
+      api.syncCalendar();
+      api.syncCalendar();
+    } finally {
+      global.Date = RealDate;
+    }
+    eq(posts.length, 1, '同じまとめが ' + posts.length + ' 回飛んだ');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7周目: 同期のあらゆる地点で失敗させ、カレンダー側を人の手で変えた結果。
 // ---------------------------------------------------------------------------
 suite('カレンダー側で書き換えられた予定を、正しい姿に戻す', () => {

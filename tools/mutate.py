@@ -53,6 +53,38 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("SQ を第3金曜に固定する", "src/06_providers.js",
+     "    const thirdFriday = expiryDay_(year, month);",
+     "    const thirdFriday = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);"),
+    ("据え置きの相手を最初に見つけたもので決める", "src/11_sync.js",
+     "      if (!best || gap < best.gap) best = { gap: gap, anchor: nearby[i] };",
+     "      if (!best) best = { gap: gap, anchor: nearby[i] };"),
+    ("据え置きの控えを重複させる", "src/11_sync.js",
+     "    if (!keptIds[best.anchor.id]) {\n"
+     "      keptIds[best.anchor.id] = true;\n"
+     "      replaced.push(best.anchor.id);   // 同じものを二度並べない\n"
+     "    }",
+     "    keptIds[best.anchor.id] = true;\n"
+     "    replaced.push(best.anchor.id);"),
+    ("通知の控えの保存で例外を漏らす", "src/13_health.js",
+     "  try {\n"
+     "    props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());\n"
+     "  } catch (err) {\n"
+     "    log_('通知の控えを保存できませんでした（次回また届きます）: ' + err);\n"
+     "  }",
+     "  props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());"),
+    ("確認先が無くても undefined と書く", "src/13_health.js",
+     "    const where = section.verify_url\n"
+     "      ? section.verify_url + ' を見て'\n"
+     "      : '中央銀行の公式ページを見て';",
+     "    const where = section.verify_url + ' を見て';"),
+    ("週次まとめを送った週を控えない", "src/14_main.js",
+     "  if (prop_(PROP_LAST_DIGEST_WEEK) === thisWeek) return false;", ""),
+    ("設定が壊れていたら showStatus を落とす", "src/14_main.js",
+     "  const problems = configProblems_();\n"
+     "  if (problems.length) {",
+     "  const problems = [];\n"
+     "  if (problems.length) {"),
     ("カレンダー側の書き換えに気づかない", "src/11_sync.js",
      "    } else if (matchesCalendar_(current, resource)) {",
      "    } else if (storedHash_(current) === resource.extendedProperties.private.hash) {"),

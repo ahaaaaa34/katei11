@@ -27,6 +27,15 @@ const LOCK_WAIT_MS = 30000;
  * エラーになる。それだと放置運用では手の打ちようがない。
  */
 function validateConfig_() {
+  const problems = configProblems_();
+  if (problems.length) {
+    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
+                    + problems.join('\n  - '));
+  }
+}
+
+/** 設定の問題を並べて返す（投げない）。困ったときの表示にも使う。 */
+function configProblems_() {
   const problems = [];
 
   try {
@@ -101,10 +110,7 @@ function validateConfig_() {
     });
   }
 
-  if (problems.length) {
-    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
-                    + problems.join('\n  - '));
-  }
+  return problems;
 }
 
 /**
@@ -329,12 +335,20 @@ function releaseLock_(lock) {
   }
 }
 
-/** 月曜の朝の回だけ、今週のまとめを Webhook に流す。 */
+/**
+ * 月曜の朝の回だけ、今週のまとめを Webhook に流す。
+ *
+ * 「月曜の午前」という条件だけだと、手で実行するたび・自動実行が二重に
+ * 走るたびに、同じまとめが何度も飛ぶ。送った週を控えて1週に1回にする。
+ */
 function maybeSendWeeklyDigest_(events, ctx) {
-  if (!prop_(PROP_WEBHOOK_URL)) return;
+  if (!prop_(PROP_WEBHOOK_URL)) return false;
   const now = tzParts_(new Date(), CONFIG.timezone);
   const today = ymd_(now.year, now.month, now.day);
-  if (weekdayOf_(today) !== 0 || now.hour >= 12) return;
+  if (weekdayOf_(today) !== 0 || now.hour >= 12) return false;
+
+  const thisWeek = dateKey_(today);
+  if (prop_(PROP_LAST_DIGEST_WEEK) === thisWeek) return false;
 
   const week = { start: today, end: addDays_(today, 6), timezone: ctx.timezone };
   const inWeek = events.filter(function (event) {
@@ -342,7 +356,13 @@ function maybeSendWeeklyDigest_(events, ctx) {
     const day = localDate_(event.start, ctx.timezone);
     return day.getTime() >= week.start.getTime() && day.getTime() <= week.end.getTime();
   });
-  postWebhook_(digestText_(inWeek, week));
+  if (!postWebhook_(digestText_(inWeek, week))) return false;
+  try {
+    props_().setProperty(PROP_LAST_DIGEST_WEEK, thisWeek);
+  } catch (err) {
+    log_('まとめを送った控えを保存できませんでした: ' + err);
+  }
+  return true;
 }
 
 /** カレンダーに触らず、何が登録されるかをログに出す。 */
@@ -359,14 +379,27 @@ function preview() {
   });
   lines.push('');
   lines.push('内訳: ' + TIERS.map(function (t) { return t + ':' + counts[t]; }).join(' / '));
-  lines.push('~ 印は発表日が推定であることを示します。');
+  lines.push('「(日付未確定)」は、発表日がまだ確定していないことを示します。');
   const text = lines.join('\n');
   log_(text);
   return text;
 }
 
-/** 設定と情報源の状態、手当てが要る項目を表示する。 */
+/**
+ * 設定と情報源の状態、手当てが要る項目を表示する。
+ *
+ * これは「うまく動かないとき」に見る画面なので、設定が壊れていても
+ * 落ちてはいけない。壊れているならその中身を出す。
+ */
 function showStatus() {
+  const problems = configProblems_();
+  if (problems.length) {
+    const text = ['設定に問題があります（00_config.js を確認してください）']
+      .concat(problems.map(function (p) { return '  - ' + p; }))
+      .concat(['', '直してから、もう一度 showStatus() を実行してください。']).join('\n');
+    log_(text);
+    return text;
+  }
   const ctx = syncWindow_();
   // fomcAutoFetch は情報源ではなく fomc の挙動スイッチなので、ここには並べない。
   const enabled = Object.keys(CONFIG.providers).filter(function (name) {
@@ -661,22 +694,30 @@ function dataQuality() {
 
   lines.push('');
   lines.push('■ 確かさを上げるには');
+  const fredCount = INDICATORS.filter(function (i) { return i.fred_release; }).length;
   if (!prop_(PROP_FRED_KEY)) {
     lines.push('   1. FRED の無料キーを取得して、スクリプト プロパティ '
                + PROP_FRED_KEY + ' に入れる');
-    lines.push('      → 主要10指標の発表日が公式の確定値になります');
+    lines.push('      → ' + fredCount + ' 指標の発表日が公式の確定値になります');
     lines.push('      https://fred.stlouisfed.org/docs/api/api_key.html');
   } else {
     lines.push('   ✅ FRED キーは設定済み');
   }
-  if (!CONFIG.providers.investing) {
-    lines.push('   2. 00_config.js の providers.investing を true にする');
-    lines.push('      → 発表時刻が実測値になり、予想値・前回値・結果値が入ります');
+  if (!CONFIG.providers.officialTimes) {
+    lines.push('   2. 00_config.js の providers.officialTimes を true にする');
+    lines.push('      → 発表時刻が、機関の予定表そのものになります');
   } else {
-    lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
+    lines.push('   ✅ 発表予定表は有効（時刻の一次情報）');
   }
-  lines.push('   3. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
-  lines.push('   4. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+  if (!CONFIG.providers.investing) {
+    lines.push('   3. 00_config.js の providers.investing を true にする');
+    lines.push('      → 予想値・前回値・結果値が入ります');
+    lines.push('        （予定表に載らない指標は、発表時刻もここから入ります）');
+  } else {
+    lines.push('   ✅ Investing は有効（予想値・前回値・結果値が入ります）');
+  }
+  lines.push('   4. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
+  lines.push('   5. verifyRules() を実行すると、発表規則の当たり具合が測れます');
 
   lines.push('');
   lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');

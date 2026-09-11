@@ -18,6 +18,10 @@ function maintenanceReport_(ctx) {
 
   [['fomc', 'FOMC'], ['boj', '日銀'], ['ecb', 'ECB']].forEach(function (pair) {
     const section = MEETINGS[pair[0]] || {};
+    // verify_url を消されていても「undefined を見て」と出さない。
+    const where = section.verify_url
+      ? section.verify_url + ' を見て'
+      : '中央銀行の公式ページを見て';
     const entries = allMeetings_(pair[0]);
     if (!entries.length) {
       // 未登録は既定の状態なので、FOMC 以外は騒がない。
@@ -26,7 +30,7 @@ function maintenanceReport_(ctx) {
           key: 'meetings:fomc',
           severity: SEVERITY_ACTION,
           message: pair[1] + ' の会合日程が1件も登録されていません。',
-          fix: section.verify_url + ' を見て 02_meetings.js に追記してください。',
+          fix: where + '02_meetings.js に追記してください。',
         });
       }
       return;
@@ -51,7 +55,7 @@ function maintenanceReport_(ctx) {
         severity: last.getTime() < ctx.end.getTime() ? SEVERITY_ACTION : SEVERITY_INFO,
         message: pair[1] + ' の会合日程が ' + dateKey_(last) + ' で切れます（'
                + when + ' / 同期範囲の末尾は ' + dateKey_(ctx.end) + '）。',
-        fix: section.verify_url + ' を見て 02_meetings.js に翌年分を追記してください。',
+        fix: where + '02_meetings.js に翌年分を追記してください。',
       });
     } else if (auto) {
       // 公式ページからの自動取得で足りている状態。動いてはいるが、
@@ -113,7 +117,14 @@ function notifyMaintenance_(findings) {
              + maintenanceText_(actionable) + '\n\n'
              + '直したあとは何もしなくて構いません。次の実行から反映されます。';
   sendMail_('[経済指標カレンダー] メンテナンスが必要です', body);
-  props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());
+  // ここで失敗して例外が漏れると、**カレンダーは正しく書けているのに
+  // 同期が失敗扱いになる**（呼び出し元の try の中にいるため）。
+  // 知らせの控えが残らないだけなので、飲み込む。
+  try {
+    props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());
+  } catch (err) {
+    log_('通知の控えを保存できませんでした（次回また届きます）: ' + err);
+  }
   postWebhook_(body);
   return true;
 }

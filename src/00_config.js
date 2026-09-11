@@ -130,6 +130,7 @@ const CONFIG = {
 const PROP_FRED_KEY = 'FRED_API_KEY';
 const PROP_WEBHOOK_URL = 'WEBHOOK_URL';
 const PROP_LAST_MAINTENANCE_MAIL = '_lastMaintenanceMail';
+const PROP_LAST_DIGEST_WEEK = '_lastDigestWeek';
 const PROP_CALENDAR_ID = '_calendarId';
 const PROP_CALENDAR_NAME = '_calendarName';
 

@@ -185,9 +185,25 @@ function pushClosures_(events, year, ctx) {
   }
 }
 
+/**
+ * オプションの満期日。原則は第3金曜だが、その日が休場なら前営業日に繰り上がる。
+ *
+ * 休場日に「SQ」の予定が立っていると、市場が開いていない日を見ることになる。
+ * 2026-06-19（ジューンティーンス）や 2025-04-18（グッドフライデー）のように、
+ * 第3金曜が休場になる年は10年に数回ある。
+ */
+function expiryDay_(year, month) {
+  const holidays = marketHolidays_(year);
+  let date = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);
+  while (weekdayOf_(date) >= 5 || holidays[dateKey_(date)]) {
+    date = addDays_(date, -1);
+  }
+  return date;
+}
+
 function pushExpiries_(events, year) {
   for (let month = 1; month <= 12; month++) {
-    const thirdFriday = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);
+    const thirdFriday = expiryDay_(year, month);
     const quad = QUARTER_MONTHS.indexOf(month) !== -1;
     const indicator = indicator_(quad ? 'market_quad_witching' : 'market_opex');
     if (!indicator) continue;

@@ -146,6 +146,7 @@ const CONFIG = {
 const PROP_FRED_KEY = 'FRED_API_KEY';
 const PROP_WEBHOOK_URL = 'WEBHOOK_URL';
 const PROP_LAST_MAINTENANCE_MAIL = '_lastMaintenanceMail';
+const PROP_LAST_DIGEST_WEEK = '_lastDigestWeek';
 const PROP_CALENDAR_ID = '_calendarId';
 const PROP_CALENDAR_NAME = '_calendarName';
 
@@ -2006,9 +2007,25 @@ function pushClosures_(events, year, ctx) {
   }
 }
 
+/**
+ * オプションの満期日。原則は第3金曜だが、その日が休場なら前営業日に繰り上がる。
+ *
+ * 休場日に「SQ」の予定が立っていると、市場が開いていない日を見ることになる。
+ * 2026-06-19（ジューンティーンス）や 2025-04-18（グッドフライデー）のように、
+ * 第3金曜が休場になる年は10年に数回ある。
+ */
+function expiryDay_(year, month) {
+  const holidays = marketHolidays_(year);
+  let date = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);
+  while (weekdayOf_(date) >= 5 || holidays[dateKey_(date)]) {
+    date = addDays_(date, -1);
+  }
+  return date;
+}
+
 function pushExpiries_(events, year) {
   for (let month = 1; month <= 12; month++) {
-    const thirdFriday = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);
+    const thirdFriday = expiryDay_(year, month);
     const quad = QUARTER_MONTHS.indexOf(month) !== -1;
     const indicator = indicator_(quad ? 'market_quad_witching' : 'market_opex');
     if (!indicator) continue;
@@ -3888,16 +3905,26 @@ function keepStrongerExisting_(events, existing) {
     if (!nearby) return true;
     const day = localDate_(event.start, CONFIG.timezone);
     const mine = confidenceRank_(event.confidence);
+
+    // **いちばん近いもの**を選ぶ。最初に見つかったものを採ると、週次の指標で
+    // 隣の週を掴んでしまう（失業保険は毎週なので、12日以内に別の週がいる）。
+    // 掴み違えると、守るつもりの無い予定を守り、守るべき予定を消す。
+    let best = null;
     for (let i = 0; i < nearby.length; i++) {
       if (nearby[i].rank <= mine) continue;
-      if (Math.abs(daysBetween_(day, nearby[i].day)) > SUPERSEDE_WINDOW_DAYS) continue;
-      log_(event.indicatorId + ': より確かな予定が既にあるので、'
-           + dateKey_(day) + ' の弱い予定は作りません');
-      keptIds[nearby[i].id] = true;
-      replaced.push(nearby[i].id);
-      return false;
+      const gap = Math.abs(daysBetween_(day, nearby[i].day));
+      if (gap > SUPERSEDE_WINDOW_DAYS) continue;
+      if (!best || gap < best.gap) best = { gap: gap, anchor: nearby[i] };
     }
-    return true;
+    if (!best) return true;
+
+    log_(event.indicatorId + ': より確かな予定が既にあるので、'
+         + dateKey_(day) + ' の弱い予定は作りません');
+    if (!keptIds[best.anchor.id]) {
+      keptIds[best.anchor.id] = true;
+      replaced.push(best.anchor.id);   // 同じものを二度並べない
+    }
+    return false;
   });
   return { events: kept, keptIds: keptIds, replaced: replaced };
 }
@@ -4226,6 +4253,10 @@ function maintenanceReport_(ctx) {
 
   [['fomc', 'FOMC'], ['boj', '日銀'], ['ecb', 'ECB']].forEach(function (pair) {
     const section = MEETINGS[pair[0]] || {};
+    // verify_url を消されていても「undefined を見て」と出さない。
+    const where = section.verify_url
+      ? section.verify_url + ' を見て'
+      : '中央銀行の公式ページを見て';
     const entries = allMeetings_(pair[0]);
     if (!entries.length) {
       // 未登録は既定の状態なので、FOMC 以外は騒がない。
@@ -4234,7 +4265,7 @@ function maintenanceReport_(ctx) {
           key: 'meetings:fomc',
           severity: SEVERITY_ACTION,
           message: pair[1] + ' の会合日程が1件も登録されていません。',
-          fix: section.verify_url + ' を見て 02_meetings.js に追記してください。',
+          fix: where + '02_meetings.js に追記してください。',
         });
       }
       return;
@@ -4259,7 +4290,7 @@ function maintenanceReport_(ctx) {
         severity: last.getTime() < ctx.end.getTime() ? SEVERITY_ACTION : SEVERITY_INFO,
         message: pair[1] + ' の会合日程が ' + dateKey_(last) + ' で切れます（'
                + when + ' / 同期範囲の末尾は ' + dateKey_(ctx.end) + '）。',
-        fix: section.verify_url + ' を見て 02_meetings.js に翌年分を追記してください。',
+        fix: where + '02_meetings.js に翌年分を追記してください。',
       });
     } else if (auto) {
       // 公式ページからの自動取得で足りている状態。動いてはいるが、
@@ -4321,7 +4352,14 @@ function notifyMaintenance_(findings) {
              + maintenanceText_(actionable) + '\n\n'
              + '直したあとは何もしなくて構いません。次の実行から反映されます。';
   sendMail_('[経済指標カレンダー] メンテナンスが必要です', body);
-  props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());
+  // ここで失敗して例外が漏れると、**カレンダーは正しく書けているのに
+  // 同期が失敗扱いになる**（呼び出し元の try の中にいるため）。
+  // 知らせの控えが残らないだけなので、飲み込む。
+  try {
+    props_().setProperty(PROP_LAST_MAINTENANCE_MAIL, signature + '|' + Date.now());
+  } catch (err) {
+    log_('通知の控えを保存できませんでした（次回また届きます）: ' + err);
+  }
   postWebhook_(body);
   return true;
 }
@@ -4377,6 +4415,15 @@ const LOCK_WAIT_MS = 30000;
  * エラーになる。それだと放置運用では手の打ちようがない。
  */
 function validateConfig_() {
+  const problems = configProblems_();
+  if (problems.length) {
+    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
+                    + problems.join('\n  - '));
+  }
+}
+
+/** 設定の問題を並べて返す（投げない）。困ったときの表示にも使う。 */
+function configProblems_() {
   const problems = [];
 
   try {
@@ -4451,10 +4498,7 @@ function validateConfig_() {
     });
   }
 
-  if (problems.length) {
-    throw new Error('設定に問題があります（00_config.js を確認してください）:\n  - '
-                    + problems.join('\n  - '));
-  }
+  return problems;
 }
 
 /**
@@ -4679,12 +4723,20 @@ function releaseLock_(lock) {
   }
 }
 
-/** 月曜の朝の回だけ、今週のまとめを Webhook に流す。 */
+/**
+ * 月曜の朝の回だけ、今週のまとめを Webhook に流す。
+ *
+ * 「月曜の午前」という条件だけだと、手で実行するたび・自動実行が二重に
+ * 走るたびに、同じまとめが何度も飛ぶ。送った週を控えて1週に1回にする。
+ */
 function maybeSendWeeklyDigest_(events, ctx) {
-  if (!prop_(PROP_WEBHOOK_URL)) return;
+  if (!prop_(PROP_WEBHOOK_URL)) return false;
   const now = tzParts_(new Date(), CONFIG.timezone);
   const today = ymd_(now.year, now.month, now.day);
-  if (weekdayOf_(today) !== 0 || now.hour >= 12) return;
+  if (weekdayOf_(today) !== 0 || now.hour >= 12) return false;
+
+  const thisWeek = dateKey_(today);
+  if (prop_(PROP_LAST_DIGEST_WEEK) === thisWeek) return false;
 
   const week = { start: today, end: addDays_(today, 6), timezone: ctx.timezone };
   const inWeek = events.filter(function (event) {
@@ -4692,7 +4744,13 @@ function maybeSendWeeklyDigest_(events, ctx) {
     const day = localDate_(event.start, ctx.timezone);
     return day.getTime() >= week.start.getTime() && day.getTime() <= week.end.getTime();
   });
-  postWebhook_(digestText_(inWeek, week));
+  if (!postWebhook_(digestText_(inWeek, week))) return false;
+  try {
+    props_().setProperty(PROP_LAST_DIGEST_WEEK, thisWeek);
+  } catch (err) {
+    log_('まとめを送った控えを保存できませんでした: ' + err);
+  }
+  return true;
 }
 
 /** カレンダーに触らず、何が登録されるかをログに出す。 */
@@ -4709,14 +4767,27 @@ function preview() {
   });
   lines.push('');
   lines.push('内訳: ' + TIERS.map(function (t) { return t + ':' + counts[t]; }).join(' / '));
-  lines.push('~ 印は発表日が推定であることを示します。');
+  lines.push('「(日付未確定)」は、発表日がまだ確定していないことを示します。');
   const text = lines.join('\n');
   log_(text);
   return text;
 }
 
-/** 設定と情報源の状態、手当てが要る項目を表示する。 */
+/**
+ * 設定と情報源の状態、手当てが要る項目を表示する。
+ *
+ * これは「うまく動かないとき」に見る画面なので、設定が壊れていても
+ * 落ちてはいけない。壊れているならその中身を出す。
+ */
 function showStatus() {
+  const problems = configProblems_();
+  if (problems.length) {
+    const text = ['設定に問題があります（00_config.js を確認してください）']
+      .concat(problems.map(function (p) { return '  - ' + p; }))
+      .concat(['', '直してから、もう一度 showStatus() を実行してください。']).join('\n');
+    log_(text);
+    return text;
+  }
   const ctx = syncWindow_();
   // fomcAutoFetch は情報源ではなく fomc の挙動スイッチなので、ここには並べない。
   const enabled = Object.keys(CONFIG.providers).filter(function (name) {
@@ -5011,22 +5082,30 @@ function dataQuality() {
 
   lines.push('');
   lines.push('■ 確かさを上げるには');
+  const fredCount = INDICATORS.filter(function (i) { return i.fred_release; }).length;
   if (!prop_(PROP_FRED_KEY)) {
     lines.push('   1. FRED の無料キーを取得して、スクリプト プロパティ '
                + PROP_FRED_KEY + ' に入れる');
-    lines.push('      → 主要10指標の発表日が公式の確定値になります');
+    lines.push('      → ' + fredCount + ' 指標の発表日が公式の確定値になります');
     lines.push('      https://fred.stlouisfed.org/docs/api/api_key.html');
   } else {
     lines.push('   ✅ FRED キーは設定済み');
   }
-  if (!CONFIG.providers.investing) {
-    lines.push('   2. 00_config.js の providers.investing を true にする');
-    lines.push('      → 発表時刻が実測値になり、予想値・前回値・結果値が入ります');
+  if (!CONFIG.providers.officialTimes) {
+    lines.push('   2. 00_config.js の providers.officialTimes を true にする');
+    lines.push('      → 発表時刻が、機関の予定表そのものになります');
   } else {
-    lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
+    lines.push('   ✅ 発表予定表は有効（時刻の一次情報）');
   }
-  lines.push('   3. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
-  lines.push('   4. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+  if (!CONFIG.providers.investing) {
+    lines.push('   3. 00_config.js の providers.investing を true にする');
+    lines.push('      → 予想値・前回値・結果値が入ります');
+    lines.push('        （予定表に載らない指標は、発表時刻もここから入ります）');
+  } else {
+    lines.push('   ✅ Investing は有効（予想値・前回値・結果値が入ります）');
+  }
+  lines.push('   4. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
+  lines.push('   5. verifyRules() を実行すると、発表規則の当たり具合が測れます');
 
   lines.push('');
   lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');
