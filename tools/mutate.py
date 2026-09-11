@@ -53,6 +53,8 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("日程の検査で、読めない日付を黙って通す", "src/08_fomc_auto.js",
+     "    if (!date) return '日付として読めない: ' + key;", "    if (!date) return;"),
     ("翌年から落ちてくる振替休日を数えない", "src/04_schedule.js",
      "  const nextNewYear = observed_(ymd_(year + 1, 1, 1));\n"
      "  if (nextNewYear.getUTCFullYear() === year) out[dateKey_(nextNewYear)] = '元日（振替）';",

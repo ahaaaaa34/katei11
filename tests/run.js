@@ -2947,6 +2947,185 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 6周目: 境界を1つずつ、両側から突いた結果。
+// ---------------------------------------------------------------------------
+suite('境界: 日程の検査は、必ず理由を返すか null を返す', () => {
+  // この関数は「通ったら null / 落としたら理由の文字列」という約束。
+  // 途中で素の return を書くと undefined が返り、**検査に通ったことに
+  // なってしまう**。壊れた日程が静かに採用される、いちばん危ない形。
+  const ok6 = ['2028-01-26', '2028-02-23', '2028-03-22',
+               '2028-04-19', '2028-05-17', '2028-06-14'];
+  const rows = (dates) => dates.map((d) => ({ date: d, sep: false }));
+
+  test('通る年は null', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.validateFomcYear_(rows(ok6), 2028), null);
+  });
+
+  test('落とす年は、必ず理由の文字列', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const cases = [
+      ['会合数が少ない', ok6.slice(0, 5)],
+      ['会合数が多い', ok6.concat(['2028-07-12', '2028-08-09', '2028-09-06',
+                                   '2028-10-04', '2028-11-01'])],
+      ['読めない日付', ['2028-01-26', 'でたらめ', '2028-03-22',
+                        '2028-04-19', '2028-05-17', '2028-06-14']],
+      ['空文字の日付', ['2028-01-26', '', '2028-03-22',
+                        '2028-04-19', '2028-05-17', '2028-06-14']],
+      ['無い日付', ['2028-01-26', '2028-02-30', '2028-03-22',
+                    '2028-04-19', '2028-05-17', '2028-06-14']],
+      ['別の年', ok6.slice(0, 5).concat(['2029-01-16'])],
+      ['重複', ok6.slice(0, 5).concat(['2028-01-26'])],
+      ['曜日が外れる', ok6.slice(0, 5).concat(['2028-06-16'])],
+      ['間隔が近すぎる', ['2028-01-26', '2028-02-16', '2028-03-08',
+                          '2028-03-29', '2028-04-19', '2028-05-10']],
+      ['間隔が空きすぎる', ok6.slice(0, 5).concat(['2028-12-13'])],
+    ];
+    cases.forEach((pair) => {
+      const problem = api.validateFomcYear_(rows(pair[1]), 2028);
+      eq(typeof problem, 'string', pair[0] + ' を通してしまう: ' + JSON.stringify(problem));
+    });
+  });
+
+  test('読めない日付が混じった年は、丸ごと採用しない', () => {
+    // 「抽出はゆるく、採用は厳しく」の約束が、ここで破れていないこと。
+    const api = loadGas({
+      Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200, getContentText: () => (
+        '<div class="panel"><div class="panel-heading">2029 FOMC Meetings</div>'
+        + '<div class="fomc-meeting__month"><strong>January</strong></div>'
+        + '<div class="fomc-meeting__date">30-31</div>'
+        + '<div class="fomc-meeting__month"><strong>February</strong></div>'
+        + '<div class="fomc-meeting__date">99-99</div></div>') }) },
+    });
+    const meetings = api.allMeetings_('fomc');
+    ok(meetings.every((m) => m.date.slice(0, 4) !== '2029'),
+       '検査に落ちた年を採らないこと: ' + meetings.map((m) => m.date).join(','));
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('境界: 同期範囲の端', () => {
+  const TZS = ['Asia/Tokyo', 'America/New_York', 'UTC', 'Australia/Sydney',
+               'America/Los_Angeles'];
+
+  test('端の日は入り、1日外は入らない（どの時差でも・1日のどの時刻でも）', () => {
+    TZS.forEach((tz) => {
+      const api = loadGas({ Calendar: fakeCalendar() });
+      api.CONFIG.timezone = tz;
+      const ctx = { start: Y(2026, 9, 10), end: Y(2026, 9, 20), timezone: tz };
+      [[Y(2026, 9, 9), false], [Y(2026, 9, 10), true], [Y(2026, 9, 20), true],
+       [Y(2026, 9, 21), false]].forEach((row) => {
+        ['00:00', '12:00', '23:59'].forEach((t) => {
+          const instant = api.zonedTime_(row[0], t, tz);
+          eq(api.inDisplayWindow_(instant, ctx), row[1],
+             tz + ' ' + K(row[0]) + ' ' + t);
+        });
+      });
+    });
+  });
+
+  test('生成の判定と、整理してよい範囲の判定がそろっている', () => {
+    // ここがずれると、作った直後の予定を次の回で消してしまう。
+    TZS.forEach((tz) => {
+      const api = loadGas({ Calendar: fakeCalendar() });
+      api.CONFIG.timezone = tz;
+      const ctx = { start: Y(2026, 9, 10), end: Y(2026, 9, 20), timezone: tz };
+      [Y(2026, 9, 9), Y(2026, 9, 10), Y(2026, 9, 20), Y(2026, 9, 21)].forEach((day) => {
+        ['00:00', '23:59'].forEach((t) => {
+          const instant = api.zonedTime_(day, t, tz);
+          const resource = api.toCalendarResource_(event(api, {
+            start: instant, end: new Date(instant.getTime() + 1800000) }));
+          eq(api.inPruneRange_({ id: resource.id, start: resource.start,
+                                 end: resource.end,
+                                 extendedProperties: resource.extendedProperties }, ctx),
+             api.inDisplayWindow_(instant, ctx), tz + ' ' + K(day) + ' ' + t);
+        });
+      });
+    });
+  });
+
+  test('幅0の窓でも動く', () => {
+    const api = loadGas({ Calendar: fakeCalendar(),
+                          properties: { _calendarId: 'c', _calendarName: 'x' } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 0;
+    api.CONFIG.window.daysBack = 0;
+    const ctx = api.syncWindow_(Y(2026, 9, 10));
+    eq([K(ctx.start), K(ctx.end)], ['2026-09-10', '2026-09-10']);
+    api.collectEvents_(ctx).forEach((e) => {
+      eq(K(api.localDate_(e.start, 'Asia/Tokyo')), '2026-09-10');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('境界: 閏日・月末・階層の境目', () => {
+  test('2月の規則は、その月に無い日に置かれない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [2024, 2025, 2026, 2028, 2032].forEach((y) => {
+      [28, 29, 30, 31].forEach((day) => {
+        const dates = api.ruleDates_({ type: 'day_of_month', day: day },
+                                     Y(y, 2, 1), Y(y, 2, 29)).map(K);
+        eq(dates.length, 1, y + '/' + day);
+        ok(/^\d{4}-02-\d{2}$/.test(dates[0]), y + '/' + day + ' -> ' + dates[0]);
+        ok(Number(dates[0].slice(8)) <= 29, dates[0]);
+      });
+    });
+  });
+
+  test('月内の営業日への寄せは、必ずその月に収まる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    for (let y = 2024; y <= 2035; y++) {
+      for (let m = 1; m <= 12; m++) {
+        [1, 15, 27, 28].forEach((d) => {
+          const near = api.businessDayNearDay_(y, m, d);
+          eq(near.getUTCMonth() + 1, m, y + '-' + m + ' ' + d + '日ごろ -> ' + K(near));
+          ok(api.isBusinessDay_(near), K(near) + ' が営業日でない');
+        });
+        const days = api.businessDaysInMonth_(y, m);
+        ok(days.length > 0, y + '-' + m + ' に営業日が無い');
+      }
+    }
+  });
+
+  test('階層の境目', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [[100, 'S'], [90, 'S'], [89, 'A'], [75, 'A'], [74, 'B'],
+     [55, 'B'], [54, 'C'], [0, 'C']].forEach((row) => {
+      eq(api.tierFor_(row[0]), row[1], String(row[0]));
+    });
+  });
+
+  test('しきい値ちょうどは入り、1つ下は入らない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.filter.minImpact = 60;
+    const at = (impact) => api.applyFilter_(
+      [{ indicatorId: 'x', impact: impact, country: 'US', category: 'c' }]).length;
+    eq(at(60), 1);
+    eq(at(59), 0);
+  });
+
+  test('推定日の間引きは、しきい値ちょうどまで効く', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const win = api.SUPERSEDE_WINDOW_DAYS;
+    const at = (gap) => {
+      const day = api.addDays_(Y(2026, 9, 11), gap);
+      return api.dropSupersededEstimates_([
+        event(api, { confidence: 'official',
+                     start: api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') }),
+        event(api, { confidence: 'estimated',
+                     start: api.zonedTime_(day, '08:30', 'America/New_York') }),
+      ], 'Asia/Tokyo').length;
+    };
+    eq(at(win - 1), 1, (win - 1) + '日差');
+    eq(at(win), 1, win + '日差（ちょうど）');
+    eq(at(win + 1), 2, (win + 1) + '日差');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5周目: 同じ計算を Python で独立に書き直し、66,983 件を突き合わせた結果。
 // ---------------------------------------------------------------------------
 suite('元日が土曜の年、前年12月31日は連邦休日', () => {

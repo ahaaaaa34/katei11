@@ -32,14 +32,16 @@ function maintenanceReport_(ctx) {
       return;
     }
 
-    let last = parseDateKey_(entries[0].date);
-    if (!last) return;
+    // 日付として読めないものは無視して、読めたものだけで最終日を出す。
+    // 先頭が壊れているだけで、その中央銀行の点検ごと飛ばさないようにする。
+    let last = null;
     let auto = false;
     entries.forEach(function (entry) {
       const date = parseDateKey_(entry.date);
       if (!date) return;
-      if (date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
+      if (!last || date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
     });
+    if (!last) return;
 
     if (last.getTime() < deadline.getTime()) {
       const days = daysBetween_(last, today);

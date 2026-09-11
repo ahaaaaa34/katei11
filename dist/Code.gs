@@ -3111,9 +3111,10 @@ function validateFomcYear_(meetings, year) {
     if (seen[key]) return '同じ日付が重複: ' + key;
     seen[key] = true;
 
+    // ここで undefined を返すと「検査に通った」ことになってしまう。
+    // 読めない日付が混じった年は、必ず理由の文字列を返して丸ごと捨てる。
     const date = parseDateKey_(key);
-    if (!date) return;
-    if (isNaN(date.getTime())) return '日付として読めない: ' + key;
+    if (!date) return '日付として読めない: ' + key;
     if (date.getUTCFullYear() !== year) return year + ' 年でない日付: ' + key;
     // 政策金利の発表は会合最終日で、実際には火〜木にしか来ない。
     const weekday = weekdayOf_(date);
@@ -4207,14 +4208,16 @@ function maintenanceReport_(ctx) {
       return;
     }
 
-    let last = parseDateKey_(entries[0].date);
-    if (!last) return;
+    // 日付として読めないものは無視して、読めたものだけで最終日を出す。
+    // 先頭が壊れているだけで、その中央銀行の点検ごと飛ばさないようにする。
+    let last = null;
     let auto = false;
     entries.forEach(function (entry) {
       const date = parseDateKey_(entry.date);
       if (!date) return;
-      if (date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
+      if (!last || date.getTime() > last.getTime()) { last = date; auto = !!entry.auto; }
     });
+    if (!last) return;
 
     if (last.getTime() < deadline.getTime()) {
       const days = daysBetween_(last, today);
