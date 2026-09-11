@@ -155,6 +155,27 @@ function confidenceRank_(name) {
   return CONFIDENCE_RANK[name] || 0;
 }
 
+/**
+ * 「発表時刻がどこから来たか」。日付の根拠とは別の軸で持つ。
+ *
+ *   official  統計を出す機関の発表予定表そのもの（BLS・BEA・センサス局）
+ *   reported  第三者の集計サイトが載せている実績時刻
+ *   fallback  01_indicators.js に書いてある暫定値。一次資料と突き合わせて
+ *             いないので、確かめられていない値として扱う
+ *
+ * 確かめていない時刻を、確かめた時刻のように見せないために型で持つ。
+ */
+const TIME_RANK = { official: 3, reported: 2, fallback: 1 };
+const TIME_LABEL = {
+  official: '発表機関の予定表',
+  reported: '集計サイトの実績時刻',
+  fallback: '未確認の暫定値',
+};
+
+function timeRank_(name) {
+  return TIME_RANK[name] || 0;
+}
+
 /** 件名に「未確定」と出すのはこれだけ。 */
 function isEstimated_(event) {
   return event.confidence === 'estimated';
@@ -171,6 +192,8 @@ const SOURCE_PRIORITY = {
   // 「日時は上位・空欄の値は下位から」で合成するのでこれで両取りになる。
   investing: 50,
   fred: 60,
+  // 発表する機関そのものの予定表。日付も時刻もここが最上位。
+  official: 65,
   digest: 70,
 };
 
@@ -194,10 +217,10 @@ function makeEvent_(fields) {
     allDay: !!fields.allDay,
     // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
     confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
-    // その情報源が「実際の発表時刻」を持っているか。
-    // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
-    // 本物の時刻を持つ情報源が現れたらそちらに譲る。
-    exactTime: !!fields.exactTime,
+    // 発表時刻の出どころ。指定が無ければ、外から時刻を持ってきたかどうかで
+    // 決める（exactTime だけを渡す古い呼び方との互換のため）。
+    timeSource: TIME_RANK[fields.timeSource] ? fields.timeSource
+      : (fields.exactTime ? 'reported' : 'fallback'),
     period: fields.period || null,
     actual: fields.actual || null,
     forecast: fields.forecast || null,
@@ -206,6 +229,8 @@ function makeEvent_(fields) {
     url: fields.url || null,
     extra: fields.extra || {},
   };
+  // 「暫定値ではない」＝カタログの時刻をそのまま当てたのではない、という意味。
+  event.exactTime = event.timeSource !== 'fallback';
   if (!(event.start instanceof Date) || !(event.end instanceof Date)) {
     throw new Error(event.indicatorId + ': start/end は Date である必要があります');
   }
@@ -272,12 +297,14 @@ function mergeEvent_(a, b) {
     merged.start = low.start;
     merged.end = low.end;
   }
-  // 時刻も同じ考え方で、本物を持っている方に譲る。
-  // 例: FRED は発表「日」しか返さないので時刻はカタログの慣例値になる。
-  // そこに実時刻を持つ情報源が来たら、日付は FRED、時刻はそちらを採る。
-  // （合成は同じ表示日のもの同士でしか起きないので、日付はずれない）
-  if (!merged.exactTime && low.exactTime) {
-    merged.exactTime = true;
+  // 時刻も同じ考え方で、出どころの確かな方に譲る。
+  // 例: FRED は発表「日」しか返さないので時刻は暫定値になる。そこへ
+  // 発表機関の予定表（official）や集計サイト（reported）が来たら、
+  // 日付は FRED、時刻はそちらを採る。
+  // （合成は同じ発表どうしでしか起きないので、日付はずれない）
+  if (timeRank_(low.timeSource) > timeRank_(merged.timeSource)) {
+    merged.timeSource = low.timeSource;
+    merged.exactTime = low.exactTime;
     merged.start = low.start;
     merged.end = low.end;
   }

@@ -1466,8 +1466,24 @@ suite('回帰: 取りこぼしと無駄な通信', () => {
     api.CONFIG.providers.fred = false;
     api.CONFIG.providers.earnings = false;
     api.CONFIG.providers.investing = false;
+    api.CONFIG.providers.officialTimes = false;
     api.syncCalendar();
     eq(calls, 1);
+  });
+
+  test('発表予定表も、1回の同期で同じ URL を1回しか叩かない', () => {
+    const urls = [];
+    const api = loadGas({
+      Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: (url) => { urls.push(url); throw new Error('down'); } },
+    });
+    Object.assign(api.CONFIG.providers,
+      { fred: false, earnings: false, investing: false, fomcAutoFetch: false });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    api.providerOfficial_(ctx);
+    api.providerOfficial_(ctx);
+    eq(urls.length, new Set(urls).size, '同じ URL を2回叩かないこと: ' + urls.join(', '));
+    eq(urls.length, api.CONFIG.officialSchedules.length);
   });
 
   test('何も採用できなかった結果は短い期間しか使い回さない', () => {
@@ -2250,17 +2266,30 @@ suite('発表時刻の出どころ', () => {
        '08:30');
   });
 
-  test('慣例値のときだけ、説明文にそう書く', () => {
+  test('時刻の出どころを、そのまま説明文に書く', () => {
     const api = loadGas();
-    ok(api.renderDescription_(make(api, { source: 'fred' })).indexOf('時刻は慣例値') !== -1);
-    ok(api.renderDescription_(make(api, { source: 'investing', exactTime: true }))
-       .indexOf('時刻は慣例値') === -1);
+    // 一次情報から来た時刻には何も断らない。それが当たり前だから。
+    const official = api.renderDescription_(
+      make(api, { source: 'official', timeSource: 'official' }));
+    ok(official.indexOf('時刻の根拠 発表機関の予定表') !== -1, official);
+    ok(official.indexOf('暫定値') === -1, official);
+
+    // 集計サイト由来は、そうと書く。
+    const site = api.renderDescription_(
+      make(api, { source: 'investing', timeSource: 'reported' }));
+    ok(site.indexOf('集計サイト由来') !== -1, site);
+
+    // カタログの値をそのまま当てただけのものは「未確認」と言い切る。
+    const guess = api.renderDescription_(make(api, { source: 'fred' }));
+    ok(guess.indexOf('未確認の暫定値') !== -1, guess);
   });
 
   test('終日にしたときは時刻の話をしない', () => {
     const api = loadGas();
     api.CONFIG.display.allDay = true;
-    ok(api.renderDescription_(make(api, { source: 'fred' })).indexOf('時刻は慣例値') === -1);
+    const text = api.renderDescription_(make(api, { source: 'fred' }));
+    ok(text.indexOf('暫定値') === -1, text);
+    ok(text.indexOf('時刻の根拠') === -1, text);
   });
 
   test('Investing を有効にすると、時刻も数値も入った予定になる', () => {
@@ -2914,6 +2943,182 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
     eq(K(api.localDate_(shown[0].start, 'Asia/Tokyo')), '2026-09-11',
        'カレンダーにある方が一覧に出ること');
     eq(shown[0].confidence, 'official');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('発表予定表（発表時刻の一次情報）', () => {
+  // 機関ごとに列の並びも日付の書式も違う。class や id には頼らない。
+  const BLS = '<table><tr><th>Release Date</th><th>Release</th><th>Time</th></tr>'
+    + '<tr><td>Tuesday, September 15, 2026</td>'
+    + '<td><a href="/x">Consumer Price Index for August 2026</a></td>'
+    + '<td>08:30 AM</td></tr>'
+    + '<tr><td>Friday, September 4, 2026</td>'
+    + '<td>Employment Situation for August 2026</td><td>8:30 a.m.</td></tr>'
+    + '<tr><td>Sep. 16</td><td>Producer Price Index for August 2026</td>'
+    + '<td>08:30 AM</td></tr></table>';
+  const BEA = '<table><tbody>'
+    + '<tr><td>8:30 AM EDT</td><td>September 25, 2026</td>'
+    + '<td>Gross Domestic Product, 2nd Quarter 2026</td></tr>'
+    + '<tr><td>8:30 AM EDT</td><td>September 28, 2026</td>'
+    + '<td>Personal Income and Outlays, August 2026</td></tr>'
+    + '<tr><td>8:30 AM EDT</td><td>September 3, 2026</td>'
+    + '<td>U.S. International Trade in Goods and Services, July 2026</td></tr>'
+    + '</tbody></table>';
+  const CENSUS = '<table>'
+    + '<tr><td>09/16/2026</td><td>10:00 AM</td>'
+    + '<td>Advance Monthly Sales for Retail and Food Services, August 2026</td></tr>'
+    + '<tr><td>09/17/2026</td><td>8:30 AM</td>'
+    + '<td>New Residential Construction, August 2026</td></tr>'
+    + '<tr><td>09/24/2026</td><td>10:00 AM</td>'
+    + '<td>New Residential Sales, August 2026</td></tr></table>';
+
+  function serving(pages, capture) {
+    return loadGas({
+      Calendar: fakeCalendar(),
+      UrlFetchApp: {
+        fetch: (url) => {
+          if (capture) capture.push(url);
+          const key = Object.keys(pages).find((k) => url.indexOf(k) !== -1);
+          if (!key) throw new Error('down: ' + url);
+          return { getResponseCode: () => 200, getContentText: () => pages[key] };
+        },
+      },
+    });
+  }
+  const ALL = { 'bls.gov': BLS, 'bea.gov': BEA, 'census.gov': CENSUS };
+  const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+
+  test('三つの機関の、違う書式の表をどれも読める', () => {
+    const api = serving(ALL);
+    const events = api.providerOfficial_(ctx);
+    const got = {};
+    events.forEach((e) => {
+      got[e.indicatorId] = K(api.localDate_(e.start, 'America/New_York'))
+        + ' ' + api.formatClock_(e.start, 'America/New_York').time;
+    });
+    eq(got.us_cpi, '2026-09-15 08:30', 'BLS: 曜日つきの日付');
+    eq(got.us_nfp, '2026-09-04 08:30', 'BLS: 小文字の a.m.');
+    eq(got.us_ppi, '2026-09-16 08:30', 'BLS: 年が書かれていない行');
+    eq(got.us_gdp, '2026-09-25 08:30', 'BEA: 列の順が違う');
+    eq(got.us_pce, '2026-09-28 08:30', 'BEA');
+    eq(got.us_trade_balance, '2026-09-03 08:30', 'BEA');
+    eq(got.us_retail_sales, '2026-09-16 10:00', 'Census: スラッシュ日付・10時');
+    eq(got.us_housing_starts, '2026-09-17 08:30', 'Census');
+    eq(got.us_new_home_sales, '2026-09-24 10:00', 'Census');
+  });
+
+  test('日付も時刻も、一次情報として扱う', () => {
+    const api = serving(ALL);
+    const cpi = api.providerOfficial_(ctx).find((e) => e.indicatorId === 'us_cpi');
+    eq(cpi.confidence, 'official', '日付の根拠');
+    eq(cpi.timeSource, 'official', '時刻の根拠');
+    eq(cpi.source, 'official');
+    ok(cpi.exactTime, 'カタログの値を当てたのではないこと');
+  });
+
+  test('カタログの暫定値より、予定表の時刻が勝つ', () => {
+    // カタログは 8:30 ET と書いてあるが、予定表が 09:15 と言うなら従う。
+    const shifted = BLS.replace('<td>08:30 AM</td></tr>'
+      + '<tr><td>Friday, September 4, 2026</td>', '<td>09:15 AM</td></tr>'
+      + '<tr><td>Friday, September 4, 2026</td>');
+    const api = serving({ 'bls.gov': shifted, 'bea.gov': BEA, 'census.gov': CENSUS });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false,
+                                          investing: false, fomcAutoFetch: false });
+    const events = api.collectEvents_(ctx);
+    const cpi = events.find((e) => e.indicatorId === 'us_cpi');
+    eq(api.formatClock_(cpi.start, 'America/New_York').time, '09:15');
+    eq(cpi.timeSource, 'official');
+    ok(api.renderDescription_(cpi).indexOf('暫定値') === -1, '暫定だとは言わないこと');
+  });
+
+  test('読み取れなければ丸ごと捨て、暫定値に落ちる', () => {
+    // 表の作りが変わって数行しか取れない、という状況。中途半端に採らない。
+    const broken = '<table><tr><td>Sep. 15, 2026</td><td>Consumer Price Index</td>'
+      + '<td>08:30 AM</td></tr></table>';
+    const api = serving({ 'bls.gov': broken, 'bea.gov': broken, 'census.gov': broken });
+    eq(api.providerOfficial_(ctx), [], '1行しか取れないページは採用しない');
+    ok(api.sourceIsDown_('official'), '落ちている扱いにすること');
+  });
+
+  test('取得できなくても同期は続き、時刻は暫定値だと明記される', () => {
+    const api = serving({});   // どの URL も落ちている
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false,
+                                          investing: false, fomcAutoFetch: false });
+    const cpi = api.collectEvents_(ctx).find((e) => e.indicatorId === 'us_cpi');
+    ok(cpi, '予定そのものは出ること');
+    eq(cpi.timeSource, 'fallback');
+    ok(api.renderDescription_(cpi).indexOf('未確認の暫定値') !== -1,
+       '確かめていないと、はっきり書くこと');
+  });
+
+  test('ありえない時刻や日付は読み間違いとみなす', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.parseScheduleTime_('02:30 AM'), null, '真夜中の発表はない');
+    eq(api.parseScheduleTime_('11:45 PM'), null);
+    eq(api.parseScheduleTime_('08:75 AM'), null, '分が壊れている');
+    eq(api.parseScheduleTime_('08:30 AM'), '08:30');
+    eq(api.parseScheduleTime_('12:00 PM'), '12:00', '正午');
+    eq(api.parseScheduleTime_('14:00'), '14:00', '24時間表記');
+
+    eq(api.parseScheduleDate_('September 31, 2026', 2026), null, '存在しない日');
+    eq(api.parseScheduleDate_('September 15, 2031', 2026), null, '表の年から離れすぎ');
+    eq(K(api.parseScheduleDate_('September 15, 2026', 2026)), '2026-09-15');
+    eq(K(api.parseScheduleDate_('Sep. 15', 2026)), '2026-09-15', '年は表から補う');
+  });
+
+  test('日付は、欄の先頭にあるものだけを読む', () => {
+    // 名前の欄を日付の欄と取り違えると、まったく別の日に予定が入る。
+    // 「先頭にある日付だけ」という約束で、それを防いでいる。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.parseScheduleDate_('Release for Sep. 15 data', 2026), null,
+       '途中の「Sep. 15」は日付として読まない');
+    eq(api.parseScheduleDate_('Revision of 2026-09-15 figures', 2026), null,
+       '途中の「2026-09-15」も読まない');
+    eq(api.parseScheduleDate_('Schedule 09/15/2026 update', 2026), null,
+       '途中の「09/15/2026」も読まない');
+    eq(api.parseScheduleDate_('Consumer Price Index for May 2026', 2026), null);
+    eq(api.parseScheduleDate_('Employment Situation', 2026), null);
+
+    // 先頭にあれば読む。曜日が前に付く表もあるので、それだけは落とす。
+    eq(K(api.parseScheduleDate_('Sep. 15, 2026', 2026)), '2026-09-15');
+    eq(K(api.parseScheduleDate_('2026-09-15', 2026)), '2026-09-15');
+    eq(K(api.parseScheduleDate_('09/15/2026', 2026)), '2026-09-15');
+    eq(K(api.parseScheduleDate_('Tuesday, September 15, 2026', 2026)), '2026-09-15');
+  });
+
+  test('名前の欄を日付の欄と取り違えない', () => {
+    const api = serving({ 'bls.gov':
+      '<table>'
+      + '<tr><td>September 15, 2026</td><td>Consumer Price Index, Sep. 22 revision</td>'
+      + '<td>08:30 AM</td></tr>'
+      + '<tr><td>September 4, 2026</td><td>Employment Situation for August 2026</td>'
+      + '<td>08:30 AM</td></tr>'
+      + '<tr><td>September 16, 2026</td><td>Producer Price Index for August 2026</td>'
+      + '<td>08:30 AM</td></tr></table>' });
+    const cpi = api.providerOfficial_(ctx).find((e) => e.indicatorId === 'us_cpi');
+    eq(K(api.localDate_(cpi.start, 'America/New_York')), '2026-09-15',
+       '名前の中の 9/22 ではなく、日付欄の 9/15 を採ること');
+  });
+
+  test('対応づけられない発表は、黙って飛ばす', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    ['Union Members 2025', 'County Employment and Wages for June 2026',
+     'Real Earnings for August 2026'].forEach((name) => {
+      eq(api.matchScheduleRelease_(name), null, name);
+    });
+  });
+
+  test('checkOfficialTimes が、読めているかをそのまま見せる', () => {
+    const api = serving(ALL);
+    const text = api.checkOfficialTimes();
+    ok(text.indexOf('✅') !== -1, text);
+    ok(text.indexOf('米 消費者物価指数 (CPI)') !== -1, text);
+
+    const dead = serving({});
+    const bad = dead.checkOfficialTimes();
+    ok(bad.indexOf('❌') !== -1, bad);
+    ok(bad.indexOf('officialSchedules') !== -1, 'どこを直せばよいか書いてあること');
   });
 });
 

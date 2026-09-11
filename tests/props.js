@@ -78,6 +78,27 @@ function earningsBody(url) {
   return JSON.stringify({ data: { rows: rows } });
 }
 
+/** 発表機関の予定表。日付も時刻もここが一次情報。 */
+const SCHEDULE_RELEASES = [
+  ['Consumer Price Index', 11, '08:30'], ['Producer Price Index', 12, '08:30'],
+  ['Employment Situation', 4, '08:30'], ['Personal Income and Outlays', 26, '08:30'],
+  ['Advance Monthly Sales for Retail and Food Services', 16, '10:00'],
+];
+
+function scheduleHtml(year, pad) {
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+                  'August', 'September', 'October', 'November', 'December'];
+  const rows = [];
+  for (let m = 0; m < 12; m++) {
+    SCHEDULE_RELEASES.forEach(function (r) {
+      rows.push('<tr><td>' + months[m] + ' ' + (r[1] + (pad % 3)) + ', ' + year
+        + '</td><td>' + r[0] + ' for ' + months[(m + 11) % 12] + ' ' + year
+        + '</td><td>' + r[2] + ' AM</td></tr>');
+    });
+  }
+  return '<table>' + rows.join('') + '</table>';
+}
+
 const FOMC_HTML_YEAR = 2028;
 const FOMC_HTML_DAYS = [[1, 25, 26], [3, 14, 15], [4, 25, 26], [6, 13, 14],
                         [7, 25, 26], [9, 12, 13], [10, 31, 1], [12, 12, 13]];
@@ -115,6 +136,12 @@ function fakeNetwork(up, pad) {
       if (!up.fomc) throw new Error('fed down');
       return ok(fomcHtml());
     }
+    if (url.indexOf('bls.gov') !== -1 || url.indexOf('bea.gov') !== -1
+        || url.indexOf('census.gov') !== -1) {
+      if (!up.official) throw new Error('schedule down');
+      const year = (/(\d{4})/.exec(url) || [])[1] || '2026';
+      return ok(scheduleHtml(Number(year), pad));
+    }
     throw new Error('想定外の URL: ' + url);
   }
   return {
@@ -148,9 +175,10 @@ function registerPropertyTests(env) {
       providers: {
         rules: bool(0.9), fomc: bool(0.8), market: bool(0.7),
         fred: bool(0.7), earnings: bool(0.5), investing: bool(0.5),
-        fomcAutoFetch: bool(0.6),
+        fomcAutoFetch: bool(0.6), officialTimes: bool(0.7),
       },
-      up: { fred: bool(0.7), investing: bool(0.7), earnings: bool(0.7), fomc: bool(0.7) },
+      up: { fred: bool(0.7), investing: bool(0.7), earnings: bool(0.7),
+            fomc: bool(0.7), official: bool(0.7) },
       today: new Date(Date.UTC(2026, Math.floor(next() * 20), 1 + Math.floor(next() * 28))),
       pad: Math.floor(next() * 3),
     };
@@ -273,7 +301,8 @@ function registerPropertyTests(env) {
         // 「公式の日程」を名乗る予定が出てはいけない。
         const anyOfficial = (spec.providers.fred && spec.up.fred)
           || (spec.providers.earnings && spec.up.earnings)
-          || (spec.providers.fomcAutoFetch && spec.up.fomc);
+          || (spec.providers.fomcAutoFetch && spec.up.fomc)
+          || (spec.providers.officialTimes && spec.up.official);
         if (props.confidence === 'official' && !anyOfficial) {
           record('情報源なしに公式を名乗らない', spec, item.id + ' ' + props.source);
         }
@@ -281,14 +310,27 @@ function registerPropertyTests(env) {
           record('根拠は4種類のいずれか', spec, item.id + ' ' + props.confidence);
         }
 
-        // 実測時刻を持たないものには「慣例値」と断る（終日は時刻を出さない）
-        const claims = (item.description || '').indexOf('発表時刻は慣例値') !== -1;
-        if (!isAllDay && (props.exact === '1') === claims) {
-          record('慣例値の断りは実測でないときだけ', spec,
-                 item.id + ' exact=' + props.exact + ' 断り=' + claims);
+        // 時刻の出どころを偽らない。一次情報でないものには必ず断りが付く。
+        const NOTE = { official: '', reported: '（発表時刻は集計サイト由来）',
+                       fallback: '（発表時刻は未確認の暫定値）' };
+        const expected = NOTE[props.ts];
+        const footer = (item.description || '').split('\n').pop();
+        if (expected === undefined) {
+          record('時刻の出どころは3種類のいずれか', spec, item.id + ' ' + props.ts);
+        } else if (!isAllDay && footer.indexOf(expected) === -1) {
+          record('時刻の断りは出どころどおり', spec,
+                 item.id + ' ts=' + props.ts + ' 末尾=' + footer);
         }
-        if (isAllDay && claims) {
+        if (isAllDay && (item.description || '').indexOf('発表時刻は') !== -1) {
           record('終日なのに時刻の断りを書かない', spec, item.id);
+        }
+        if (!isAllDay && props.ts === 'fallback'
+            && (item.description || '').indexOf('未確認の暫定値') === -1) {
+          record('暫定値は必ず未確認だと書く', spec, item.id);
+        }
+        if (props.ts === 'official'
+            && !(spec.providers.officialTimes && spec.up.official)) {
+          record('予定表なしに一次情報の時刻を名乗らない', spec, item.id);
         }
 
         // Google の受け入れ範囲
@@ -496,7 +538,9 @@ function registerPropertyTests(env) {
       '終日設定なら時刻を持たない', '時刻つきなら開始と終了がそろっている',
       '終了は開始より後', '覚えた時刻と書いた時刻が一致する',
       '情報源なしに公式を名乗らない', '根拠は4種類のいずれか',
-      '慣例値の断りは実測でないときだけ', '終日なのに時刻の断りを書かない',
+      '時刻の出どころは3種類のいずれか', '時刻の断りは出どころどおり',
+      '予定表なしに一次情報の時刻を名乗らない',
+      '終日なのに時刻の断りを書かない', '暫定値は必ず未確認だと書く',
       '件名は空でなく長すぎない', '説明は空でなく長すぎない', '色 ID は 1〜11',
       '通知は Google が受け取れる分数', 'しきい値より下は入らない',
       '書いた予定は読み戻せる', '読み戻しても中身が変わらない',

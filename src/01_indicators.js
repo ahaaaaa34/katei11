@@ -5,8 +5,18 @@
  * 書式は tests/run.js の「指標カタログ」が検証しています。
  *
  * impact: ナスダック100への影響度 (0-100)。S>=90 / A>=75 / B>=55 / C<55
- * time  : 発表時刻 (America/New_York)。夏時間は自動で処理される。
  * schedule.exact: true なら規則が確定的、false なら概算（FRED が上書きする）
+ *
+ * time: 発表時刻 (既定は America/New_York。tz を書けば変えられる)
+ *
+ *   これは **一次情報が取れなかったときの暫定値** です。
+ *   通常は BLS・BEA・センサス局の発表予定表（00_config.js の
+ *   officialSchedules）から、機関の公表値そのものを使います。
+ *   予定表に載らない指標（ISM・ミシガン大・地区連銀サーベイなど）だけ
+ *   ここの値に落ち、その予定には「未確認の暫定値」と明記されます。
+ *
+ *   なので、ここを正確に保つことより、予定表が読めていること
+ *   （checkOfficialTimes() で確認）の方が大事です。
  */
 
 const INDICATORS = [

@@ -440,3 +440,275 @@ function investingPeriod_(name) {
   const match = /\(([A-Z][a-z]{2}(?:\/[A-Z][a-z]{2})?|Q[1-4])\)\s*$/.exec(name);
   return match ? match[1] : null;
 }
+
+// ---------------------------------------------------------------------------
+// official — 統計を出す機関そのものが公表している「発表予定表」。
+//
+// 発表「日」は FRED からも取れるが、FRED は時刻を持たない。
+// **発表時刻が書いてあるのはこの表だけ**で、ここが唯一の一次情報になる。
+// 01_indicators.js に書いてある 8:30 ET などは、ここが取れないときの
+// 最後の逃げ道でしかなく、その場合は予定に「未確認の暫定値」と明記する。
+//
+// 相手は HTML なので、いつ形が変わってもおかしくない。FOMC 日程と同じく
+// 「抽出はゆるく、採用は厳しく」で扱う。表の class や id には一切頼らず、
+// 行の中から「日付に読める欄・時刻に読める欄・名前らしい欄」を拾い、
+// 三つそろって初めて1行として認める。
+// ---------------------------------------------------------------------------
+
+/** 実行中に同じ URL を何度も取りに行かないための覚え書き。 */
+let SCHEDULE_MEMO_ = {};
+
+function resetScheduleMemo_() { SCHEDULE_MEMO_ = {}; }
+
+/** 発表予定表として認めるための下限。これを割ったら丸ごと捨てる。 */
+const SCHEDULE_MIN_ROWS = 3;
+/** 発表時刻として現実的な範囲（現地時間）。外れたら読み間違いとみなす。 */
+const SCHEDULE_MIN_HOUR = 4;
+const SCHEDULE_MAX_HOUR = 22;
+
+function providerOfficial_(ctx) {
+  const sources = CONFIG.officialSchedules || [];
+  if (!sources.length) return [];
+
+  const events = [];
+  let alive = 0;
+  sources.forEach(function (source) {
+    const rows = scheduleRowsFor_(source, ctx);
+    if (rows === null) return;
+    alive++;
+    rows.forEach(function (row) {
+      const indicator = matchScheduleRelease_(row.name);
+      if (!indicator) return;
+      const start = zonedTime_(row.date, row.time, source.tz || ET);
+      if (!inDisplayWindow_(start, ctx)) return;
+      events.push(makeEvent_({
+        indicatorId: indicator.id,
+        title: indicator.name,
+        start: start,
+        end: new Date(start.getTime() + (indicator.duration || 30) * 60000),
+        impact: indicator.impact,
+        country: indicator.country,
+        category: indicator.category,
+        source: 'official',
+        confidence: 'official',    // 発表する機関そのものの予定表
+        timeSource: 'official',    // 時刻も同じ表から来ている
+        period: periodLabel_(row.date, indicator.period_offset || 0),
+        note: indicator.why,
+        url: indicator.url,
+        extra: { schedule: source.name, releaseName: row.name },
+      }));
+    });
+  });
+
+  if (!alive) markSourceDown_('official', '発表予定表をひとつも取得できませんでした');
+  log_('official: ' + events.length + ' 件');
+  return events;
+}
+
+/**
+ * その情報源から、同期範囲に関わる年ぶんの行を集める。
+ * ひとつも取れなければ null（落ちている、と扱う）。
+ */
+function scheduleRowsFor_(source, ctx) {
+  const years = scheduleYears_(ctx);
+  let got = false;
+  let rows = [];
+  years.forEach(function (year) {
+    const page = fetchSchedulePage_(source, year);
+    if (page === null) return;
+    got = true;
+    rows = rows.concat(page);
+  });
+  return got ? rows : null;
+}
+
+/** 同期範囲がまたぐ年。年末年始は2年ぶん要る。 */
+function scheduleYears_(ctx) {
+  const years = [];
+  for (let y = ctx.start.getUTCFullYear(); y <= ctx.end.getUTCFullYear(); y++) {
+    years.push(y);
+  }
+  return years;
+}
+
+function fetchSchedulePage_(source, year) {
+  const url = String(source.url || '').replace(/\{\{year\}\}/g, String(year));
+  if (!url) return null;
+  if (Object.prototype.hasOwnProperty.call(SCHEDULE_MEMO_, url)) return SCHEDULE_MEMO_[url];
+
+  const html = fetchText_(url);
+  let rows = null;
+  if (html === null) {
+    log_('発表予定表を取得できませんでした: ' + url);
+  } else {
+    const parsed = parseScheduleRows_(html, year);
+    // 行がほとんど取れないのは、表の作りが変わった合図。中途半端に
+    // 採ると誤った時刻が入るので、丸ごと捨てて暫定値に落とす。
+    if (parsed.length < SCHEDULE_MIN_ROWS) {
+      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + url);
+    } else {
+      rows = parsed;
+    }
+  }
+  SCHEDULE_MEMO_[url] = rows;
+  return rows;
+}
+
+/**
+ * 表の行から (日付・時刻・発表名) を拾う。
+ *
+ * class も id も見ない。どの機関の表でも、1行の中に
+ * 「日付に読める欄」「時刻に読める欄」「名前らしい欄」が並ぶ、という
+ * 形だけに頼る。列の順番が違っても、列が増えても動く。
+ */
+function parseScheduleRows_(html, defaultYear) {
+  const rows = [];
+  const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let match;
+  while ((match = rowRe.exec(html)) !== null) {
+    const cells = [];
+    const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cell;
+    while ((cell = cellRe.exec(match[1])) !== null) cells.push(plainText_(cell[1]));
+    const row = scheduleRowFromCells_(cells, defaultYear);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+function scheduleRowFromCells_(cells, defaultYear) {
+  let timeIndex = -1;
+  let time = null;
+  for (let i = 0; i < cells.length; i++) {
+    const parsed = parseScheduleTime_(cells[i]);
+    if (parsed) { timeIndex = i; time = parsed; break; }
+  }
+  if (!time) return null;
+
+  let dateIndex = -1;
+  let date = null;
+  for (let i = 0; i < cells.length; i++) {
+    if (i === timeIndex) continue;
+    const parsed = parseScheduleDate_(cells[i], defaultYear);
+    if (parsed) { dateIndex = i; date = parsed; break; }
+  }
+  if (!date) return null;
+
+  // 残りのうち、いちばん長い文字列を発表名とみなす。
+  let name = '';
+  for (let i = 0; i < cells.length; i++) {
+    if (i === timeIndex || i === dateIndex) continue;
+    if (cells[i].length > name.length) name = cells[i];
+  }
+  if (!/[A-Za-z]{4}/.test(name)) return null;
+
+  return { date: date, time: time, name: name };
+}
+
+/** 「08:30 AM」「8:30 a.m.」「14:00」などを "HH:MM" にする。 */
+function parseScheduleTime_(text) {
+  const match = /\b(\d{1,2}):(\d{2})\s*(?:([AaPp])\.?\s*[Mm]\.?)?/.exec(String(text));
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (minute > 59) return null;
+  const half = match[3] ? match[3].toLowerCase() : null;
+  if (half === 'p' && hour < 12) hour += 12;
+  if (half === 'a' && hour === 12) hour = 0;
+  if (hour > 23) return null;
+  // 統計の発表が真夜中に出ることはない。外れていたら読み間違い。
+  if (hour < SCHEDULE_MIN_HOUR || hour > SCHEDULE_MAX_HOUR) return null;
+  return pad2_(hour) + ':' + pad2_(minute);
+}
+
+const SCHEDULE_MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/**
+ * 日付欄を読む。**欄の先頭にある日付だけ**を認める。
+ * 発表名の途中に出てくる数字を日付と取り違えないため。
+ */
+function parseScheduleDate_(text, defaultYear) {
+  // 曜日が前に付く表があるので、それだけは先に落とす。
+  const s = String(text).replace(/^\s*[A-Za-z]{3,9}day\s*,?\s*/i, '').trim();
+
+  let match = /^(\d{4})-(\d{1,2})-(\d{1,2})\b/.exec(s);
+  if (match) return safeYmd_(+match[1], +match[2], +match[3], defaultYear);
+
+  match = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b/.exec(s);
+  if (match) {
+    const month = SCHEDULE_MONTHS[match[1].slice(0, 3).toLowerCase()];
+    if (month) return safeYmd_(match[3] ? +match[3] : defaultYear, month, +match[2], defaultYear);
+  }
+
+  match = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/.exec(s);
+  if (match) {
+    const year = Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+    return safeYmd_(year, +match[1], +match[2], defaultYear);
+  }
+  return null;
+}
+
+/** 読み取った日付が現実的かを確かめてから Date にする。 */
+function safeYmd_(year, month, day, defaultYear) {
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return null;
+  // 表の年から大きく外れていたら読み間違い。
+  if (Math.abs(year - defaultYear) > 1) return null;
+  const date = ymd_(year, month, day);
+  if (date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return date;
+}
+
+/**
+ * 発表予定表の名前を指標に対応づける。
+ *
+ * 機関の発表名は FRED の release 名とほぼ同じ文字列なので、
+ * すでに重なりを検査してある fred_release をそのまま使う。
+ * 当たらなければ、米国の指標に限って名前の名寄せも試す。
+ */
+function matchScheduleRelease_(name) {
+  const plain = scheduleReleaseName_(name);
+  return matchFredRelease_(plain) || matchEventName_(plain, null, 'US')
+      || matchFredRelease_(name) || matchEventName_(name, null, 'US');
+}
+
+const PERIOD_WORDS =
+  'January|February|March|April|May|June|July|August|September|October|November|December'
+  + '|First|Second|Third|Fourth|1st|2nd|3rd|4th|Q[1-4]';
+
+/**
+ * 発表名から、対象期間の部分を落とす。
+ *
+ * 機関の予定表は「Consumer Price Index for December 2025」のように
+ * 対象月が付く。fred_release は「^Consumer Price Index$」と端を留めて
+ * あるので（別の release まで巻き込まないため）、そのままでは当たらない。
+ *
+ * 最初に出てくる月名・四半期・西暦のところで切り、手前に残った
+ * 「for」「,」「-」といったつなぎを落とす。指標名そのものに月名や
+ * 西暦が入ることはないので、これで名前だけが残る。
+ */
+function scheduleReleaseName_(name) {
+  const cut = new RegExp('\\b(?:' + PERIOD_WORDS + '|\\d{4})\\b', 'i').exec(String(name));
+  const head = cut ? String(name).slice(0, cut.index) : String(name);
+  return head
+    .replace(/[\s,;:\u2013\u2014-]+$/, '')
+    .replace(/\s+(?:for|in|of)$/i, '')
+    .replace(/[\s,;:\u2013\u2014-]+$/, '')
+    .replace(/\s*\($/, '')
+    .trim();
+}
+
+/** タグと実体参照を落として、素のテキストにする。 */
+function plainText_(html) {
+  return String(html)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#(\d+);/g, function (_, code) { return String.fromCharCode(Number(code)); })
+    .replace(/\s+/g, ' ')
+    .trim();
+}

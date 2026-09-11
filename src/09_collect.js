@@ -67,10 +67,16 @@ function downSources_() { return Object.keys(SOURCE_DOWN_); }
  */
 function collectEvents_(ctx) {
   resetSourceHealth_();
+  resetScheduleMemo_();
   const providers = [];
   if (CONFIG.providers.rules) providers.push({ name: 'rules', run: providerRules_ });
   if (CONFIG.providers.fomc) providers.push({ name: 'fomc', run: providerFomc_ });
   if (CONFIG.providers.market) providers.push({ name: 'market', run: providerMarket_ });
+  // 発表機関の予定表が先。時刻を持つ唯一の一次情報なので、
+  // 他が同じ発表を持ってきても時刻はこちらが勝つ。
+  if (CONFIG.providers.officialTimes) {
+    providers.push({ name: 'official', run: providerOfficial_ });
+  }
   if (CONFIG.providers.fred) providers.push({ name: 'fred', run: providerFred_ });
   if (CONFIG.providers.earnings) providers.push({ name: 'earnings', run: providerEarnings_ });
   if (CONFIG.providers.investing) providers.push({ name: 'investing', run: providerInvesting_ });

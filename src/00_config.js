@@ -48,7 +48,36 @@ const CONFIG = {
     earnings: true,
     // Investing.com（非公式・予想値と結果値が入る）。自己責任で true に。
     investing: false,
+    // 統計を出す機関そのものの「発表予定表」。日付だけでなく
+    // **発表時刻** が書いてある唯一の一次情報なので、既定で有効。
+    officialTimes: true,
   },
+
+  /**
+   * 発表予定表の取得先（一次情報）。
+   *
+   * ここが取れているあいだ、発表時刻は機関の公表値そのものになります。
+   * 取れなければ 01_indicators.js の暫定値に落ちますが、その予定には
+   * 「未確認の暫定値」と書かれます（確かめていない値を、黙って
+   * 確かな時刻のように見せることはしません）。
+   *
+   *   url : {{year}} は対象の年に置き換わります（年ごとの表のとき）
+   *   tz  : その表に書かれている時刻のタイムゾーン
+   *
+   * ページの作りが変わって取れなくなったら checkOfficialTimes() が
+   * 教えてくれます。URL だけ直せば復帰します。
+   */
+  officialSchedules: [
+    { name: 'BLS（労働統計局）',
+      url: 'https://www.bls.gov/schedule/news_release/{{year}}_sched.htm',
+      tz: 'America/New_York' },
+    { name: 'BEA（経済分析局）',
+      url: 'https://www.bea.gov/news/schedule',
+      tz: 'America/New_York' },
+    { name: 'Census（センサス局）',
+      url: 'https://www.census.gov/economic-indicators/',
+      tz: 'America/New_York' },
+  ],
 
   // investing を有効にしたとき、時刻がずれる場合だけ触ってください。
   // timezoneId はサイト内部の ID、assumeTz はそれが指すタイムゾーンです。

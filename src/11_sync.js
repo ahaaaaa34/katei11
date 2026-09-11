@@ -75,6 +75,7 @@ function toCalendarResource_(event) {
         // 情報源が一時的に落ちても、実測の時刻や発表された数値が
         // カレンダーから消えないようにするため。
         exact: event.exactTime ? '1' : '0',
+        ts: event.timeSource,
         at: event.start.toISOString(),
         a: event.actual || '',
         f: event.forecast || '',
@@ -264,9 +265,14 @@ function inheritFromExisting_(events, existing) {
       // 同じ日付なので、根拠だけ引き継いでよい。
       patch.confidence = props.confidence;
     }
-    if (!event.exactTime && props.exact === '1' && props.at) {
+    // 時刻も、前回より出どころの確かなものが残っていれば引き継ぐ。
+    // 発表機関の予定表が一時的に取れなかっただけで、カレンダーの時刻が
+    // 暫定値に巻き戻る、ということを避ける。
+    const storedTime = props.ts || (props.exact === '1' ? 'reported' : 'fallback');
+    if (timeRank_(storedTime) > timeRank_(event.timeSource) && props.at) {
       const remembered = new Date(props.at);
       if (!isNaN(remembered.getTime())) {
+        patch.timeSource = storedTime;
         patch.exactTime = true;
         patch.start = remembered;
         patch.end = new Date(remembered.getTime() + (event.end - event.start));
@@ -357,7 +363,8 @@ function eventFromResource_(item) {
     source: props.source || 'rules',
     confidence: props.confidence || 'estimated',
     allDay: allDay,
-    exactTime: props.exact === '1',
+    // ts が無いのは、この項目を持つ前に書いた予定。exact から補う。
+    timeSource: props.ts || (props.exact === '1' ? 'reported' : 'fallback'),
     actual: props.a || null,
     forecast: props.f || null,
     previous: props.p || null,

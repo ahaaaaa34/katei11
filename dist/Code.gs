@@ -64,7 +64,36 @@ const CONFIG = {
     earnings: true,
     // Investing.com（非公式・予想値と結果値が入る）。自己責任で true に。
     investing: false,
+    // 統計を出す機関そのものの「発表予定表」。日付だけでなく
+    // **発表時刻** が書いてある唯一の一次情報なので、既定で有効。
+    officialTimes: true,
   },
+
+  /**
+   * 発表予定表の取得先（一次情報）。
+   *
+   * ここが取れているあいだ、発表時刻は機関の公表値そのものになります。
+   * 取れなければ 01_indicators.js の暫定値に落ちますが、その予定には
+   * 「未確認の暫定値」と書かれます（確かめていない値を、黙って
+   * 確かな時刻のように見せることはしません）。
+   *
+   *   url : {{year}} は対象の年に置き換わります（年ごとの表のとき）
+   *   tz  : その表に書かれている時刻のタイムゾーン
+   *
+   * ページの作りが変わって取れなくなったら checkOfficialTimes() が
+   * 教えてくれます。URL だけ直せば復帰します。
+   */
+  officialSchedules: [
+    { name: 'BLS（労働統計局）',
+      url: 'https://www.bls.gov/schedule/news_release/{{year}}_sched.htm',
+      tz: 'America/New_York' },
+    { name: 'BEA（経済分析局）',
+      url: 'https://www.bea.gov/news/schedule',
+      tz: 'America/New_York' },
+    { name: 'Census（センサス局）',
+      url: 'https://www.census.gov/economic-indicators/',
+      tz: 'America/New_York' },
+  ],
 
   // investing を有効にしたとき、時刻がずれる場合だけ触ってください。
   // timezoneId はサイト内部の ID、assumeTz はそれが指すタイムゾーンです。
@@ -135,8 +164,18 @@ const MANAGED_VALUE = '1';
  * 書式は tests/run.js の「指標カタログ」が検証しています。
  *
  * impact: ナスダック100への影響度 (0-100)。S>=90 / A>=75 / B>=55 / C<55
- * time  : 発表時刻 (America/New_York)。夏時間は自動で処理される。
  * schedule.exact: true なら規則が確定的、false なら概算（FRED が上書きする）
+ *
+ * time: 発表時刻 (既定は America/New_York。tz を書けば変えられる)
+ *
+ *   これは **一次情報が取れなかったときの暫定値** です。
+ *   通常は BLS・BEA・センサス局の発表予定表（00_config.js の
+ *   officialSchedules）から、機関の公表値そのものを使います。
+ *   予定表に載らない指標（ISM・ミシガン大・地区連銀サーベイなど）だけ
+ *   ここの値に落ち、その予定には「未確認の暫定値」と明記されます。
+ *
+ *   なので、ここを正確に保つことより、予定表が読めていること
+ *   （checkOfficialTimes() で確認）の方が大事です。
  */
 
 const INDICATORS = [
@@ -1554,6 +1593,27 @@ function confidenceRank_(name) {
   return CONFIDENCE_RANK[name] || 0;
 }
 
+/**
+ * 「発表時刻がどこから来たか」。日付の根拠とは別の軸で持つ。
+ *
+ *   official  統計を出す機関の発表予定表そのもの（BLS・BEA・センサス局）
+ *   reported  第三者の集計サイトが載せている実績時刻
+ *   fallback  01_indicators.js に書いてある暫定値。一次資料と突き合わせて
+ *             いないので、確かめられていない値として扱う
+ *
+ * 確かめていない時刻を、確かめた時刻のように見せないために型で持つ。
+ */
+const TIME_RANK = { official: 3, reported: 2, fallback: 1 };
+const TIME_LABEL = {
+  official: '発表機関の予定表',
+  reported: '集計サイトの実績時刻',
+  fallback: '未確認の暫定値',
+};
+
+function timeRank_(name) {
+  return TIME_RANK[name] || 0;
+}
+
 /** 件名に「未確定」と出すのはこれだけ。 */
 function isEstimated_(event) {
   return event.confidence === 'estimated';
@@ -1570,6 +1630,8 @@ const SOURCE_PRIORITY = {
   // 「日時は上位・空欄の値は下位から」で合成するのでこれで両取りになる。
   investing: 50,
   fred: 60,
+  // 発表する機関そのものの予定表。日付も時刻もここが最上位。
+  official: 65,
   digest: 70,
 };
 
@@ -1593,10 +1655,10 @@ function makeEvent_(fields) {
     allDay: !!fields.allDay,
     // 日付の根拠。指定が無いものは「概算」に倒す（過大に言わないため）。
     confidence: CONFIDENCE_RANK[fields.confidence] ? fields.confidence : 'estimated',
-    // その情報源が「実際の発表時刻」を持っているか。
-    // false のものはカタログの慣例値（8:30 ET など）を当てているだけなので、
-    // 本物の時刻を持つ情報源が現れたらそちらに譲る。
-    exactTime: !!fields.exactTime,
+    // 発表時刻の出どころ。指定が無ければ、外から時刻を持ってきたかどうかで
+    // 決める（exactTime だけを渡す古い呼び方との互換のため）。
+    timeSource: TIME_RANK[fields.timeSource] ? fields.timeSource
+      : (fields.exactTime ? 'reported' : 'fallback'),
     period: fields.period || null,
     actual: fields.actual || null,
     forecast: fields.forecast || null,
@@ -1605,6 +1667,8 @@ function makeEvent_(fields) {
     url: fields.url || null,
     extra: fields.extra || {},
   };
+  // 「暫定値ではない」＝カタログの時刻をそのまま当てたのではない、という意味。
+  event.exactTime = event.timeSource !== 'fallback';
   if (!(event.start instanceof Date) || !(event.end instanceof Date)) {
     throw new Error(event.indicatorId + ': start/end は Date である必要があります');
   }
@@ -1671,12 +1735,14 @@ function mergeEvent_(a, b) {
     merged.start = low.start;
     merged.end = low.end;
   }
-  // 時刻も同じ考え方で、本物を持っている方に譲る。
-  // 例: FRED は発表「日」しか返さないので時刻はカタログの慣例値になる。
-  // そこに実時刻を持つ情報源が来たら、日付は FRED、時刻はそちらを採る。
-  // （合成は同じ表示日のもの同士でしか起きないので、日付はずれない）
-  if (!merged.exactTime && low.exactTime) {
-    merged.exactTime = true;
+  // 時刻も同じ考え方で、出どころの確かな方に譲る。
+  // 例: FRED は発表「日」しか返さないので時刻は暫定値になる。そこへ
+  // 発表機関の予定表（official）や集計サイト（reported）が来たら、
+  // 日付は FRED、時刻はそちらを採る。
+  // （合成は同じ発表どうしでしか起きないので、日付はずれない）
+  if (timeRank_(low.timeSource) > timeRank_(merged.timeSource)) {
+    merged.timeSource = low.timeSource;
+    merged.exactTime = low.exactTime;
     merged.start = low.start;
     merged.end = low.end;
   }
@@ -2369,6 +2435,278 @@ function investingPeriod_(name) {
   return match ? match[1] : null;
 }
 
+// ---------------------------------------------------------------------------
+// official — 統計を出す機関そのものが公表している「発表予定表」。
+//
+// 発表「日」は FRED からも取れるが、FRED は時刻を持たない。
+// **発表時刻が書いてあるのはこの表だけ**で、ここが唯一の一次情報になる。
+// 01_indicators.js に書いてある 8:30 ET などは、ここが取れないときの
+// 最後の逃げ道でしかなく、その場合は予定に「未確認の暫定値」と明記する。
+//
+// 相手は HTML なので、いつ形が変わってもおかしくない。FOMC 日程と同じく
+// 「抽出はゆるく、採用は厳しく」で扱う。表の class や id には一切頼らず、
+// 行の中から「日付に読める欄・時刻に読める欄・名前らしい欄」を拾い、
+// 三つそろって初めて1行として認める。
+// ---------------------------------------------------------------------------
+
+/** 実行中に同じ URL を何度も取りに行かないための覚え書き。 */
+let SCHEDULE_MEMO_ = {};
+
+function resetScheduleMemo_() { SCHEDULE_MEMO_ = {}; }
+
+/** 発表予定表として認めるための下限。これを割ったら丸ごと捨てる。 */
+const SCHEDULE_MIN_ROWS = 3;
+/** 発表時刻として現実的な範囲（現地時間）。外れたら読み間違いとみなす。 */
+const SCHEDULE_MIN_HOUR = 4;
+const SCHEDULE_MAX_HOUR = 22;
+
+function providerOfficial_(ctx) {
+  const sources = CONFIG.officialSchedules || [];
+  if (!sources.length) return [];
+
+  const events = [];
+  let alive = 0;
+  sources.forEach(function (source) {
+    const rows = scheduleRowsFor_(source, ctx);
+    if (rows === null) return;
+    alive++;
+    rows.forEach(function (row) {
+      const indicator = matchScheduleRelease_(row.name);
+      if (!indicator) return;
+      const start = zonedTime_(row.date, row.time, source.tz || ET);
+      if (!inDisplayWindow_(start, ctx)) return;
+      events.push(makeEvent_({
+        indicatorId: indicator.id,
+        title: indicator.name,
+        start: start,
+        end: new Date(start.getTime() + (indicator.duration || 30) * 60000),
+        impact: indicator.impact,
+        country: indicator.country,
+        category: indicator.category,
+        source: 'official',
+        confidence: 'official',    // 発表する機関そのものの予定表
+        timeSource: 'official',    // 時刻も同じ表から来ている
+        period: periodLabel_(row.date, indicator.period_offset || 0),
+        note: indicator.why,
+        url: indicator.url,
+        extra: { schedule: source.name, releaseName: row.name },
+      }));
+    });
+  });
+
+  if (!alive) markSourceDown_('official', '発表予定表をひとつも取得できませんでした');
+  log_('official: ' + events.length + ' 件');
+  return events;
+}
+
+/**
+ * その情報源から、同期範囲に関わる年ぶんの行を集める。
+ * ひとつも取れなければ null（落ちている、と扱う）。
+ */
+function scheduleRowsFor_(source, ctx) {
+  const years = scheduleYears_(ctx);
+  let got = false;
+  let rows = [];
+  years.forEach(function (year) {
+    const page = fetchSchedulePage_(source, year);
+    if (page === null) return;
+    got = true;
+    rows = rows.concat(page);
+  });
+  return got ? rows : null;
+}
+
+/** 同期範囲がまたぐ年。年末年始は2年ぶん要る。 */
+function scheduleYears_(ctx) {
+  const years = [];
+  for (let y = ctx.start.getUTCFullYear(); y <= ctx.end.getUTCFullYear(); y++) {
+    years.push(y);
+  }
+  return years;
+}
+
+function fetchSchedulePage_(source, year) {
+  const url = String(source.url || '').replace(/\{\{year\}\}/g, String(year));
+  if (!url) return null;
+  if (Object.prototype.hasOwnProperty.call(SCHEDULE_MEMO_, url)) return SCHEDULE_MEMO_[url];
+
+  const html = fetchText_(url);
+  let rows = null;
+  if (html === null) {
+    log_('発表予定表を取得できませんでした: ' + url);
+  } else {
+    const parsed = parseScheduleRows_(html, year);
+    // 行がほとんど取れないのは、表の作りが変わった合図。中途半端に
+    // 採ると誤った時刻が入るので、丸ごと捨てて暫定値に落とす。
+    if (parsed.length < SCHEDULE_MIN_ROWS) {
+      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + url);
+    } else {
+      rows = parsed;
+    }
+  }
+  SCHEDULE_MEMO_[url] = rows;
+  return rows;
+}
+
+/**
+ * 表の行から (日付・時刻・発表名) を拾う。
+ *
+ * class も id も見ない。どの機関の表でも、1行の中に
+ * 「日付に読める欄」「時刻に読める欄」「名前らしい欄」が並ぶ、という
+ * 形だけに頼る。列の順番が違っても、列が増えても動く。
+ */
+function parseScheduleRows_(html, defaultYear) {
+  const rows = [];
+  const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let match;
+  while ((match = rowRe.exec(html)) !== null) {
+    const cells = [];
+    const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cell;
+    while ((cell = cellRe.exec(match[1])) !== null) cells.push(plainText_(cell[1]));
+    const row = scheduleRowFromCells_(cells, defaultYear);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+function scheduleRowFromCells_(cells, defaultYear) {
+  let timeIndex = -1;
+  let time = null;
+  for (let i = 0; i < cells.length; i++) {
+    const parsed = parseScheduleTime_(cells[i]);
+    if (parsed) { timeIndex = i; time = parsed; break; }
+  }
+  if (!time) return null;
+
+  let dateIndex = -1;
+  let date = null;
+  for (let i = 0; i < cells.length; i++) {
+    if (i === timeIndex) continue;
+    const parsed = parseScheduleDate_(cells[i], defaultYear);
+    if (parsed) { dateIndex = i; date = parsed; break; }
+  }
+  if (!date) return null;
+
+  // 残りのうち、いちばん長い文字列を発表名とみなす。
+  let name = '';
+  for (let i = 0; i < cells.length; i++) {
+    if (i === timeIndex || i === dateIndex) continue;
+    if (cells[i].length > name.length) name = cells[i];
+  }
+  if (!/[A-Za-z]{4}/.test(name)) return null;
+
+  return { date: date, time: time, name: name };
+}
+
+/** 「08:30 AM」「8:30 a.m.」「14:00」などを "HH:MM" にする。 */
+function parseScheduleTime_(text) {
+  const match = /\b(\d{1,2}):(\d{2})\s*(?:([AaPp])\.?\s*[Mm]\.?)?/.exec(String(text));
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (minute > 59) return null;
+  const half = match[3] ? match[3].toLowerCase() : null;
+  if (half === 'p' && hour < 12) hour += 12;
+  if (half === 'a' && hour === 12) hour = 0;
+  if (hour > 23) return null;
+  // 統計の発表が真夜中に出ることはない。外れていたら読み間違い。
+  if (hour < SCHEDULE_MIN_HOUR || hour > SCHEDULE_MAX_HOUR) return null;
+  return pad2_(hour) + ':' + pad2_(minute);
+}
+
+const SCHEDULE_MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/**
+ * 日付欄を読む。**欄の先頭にある日付だけ**を認める。
+ * 発表名の途中に出てくる数字を日付と取り違えないため。
+ */
+function parseScheduleDate_(text, defaultYear) {
+  // 曜日が前に付く表があるので、それだけは先に落とす。
+  const s = String(text).replace(/^\s*[A-Za-z]{3,9}day\s*,?\s*/i, '').trim();
+
+  let match = /^(\d{4})-(\d{1,2})-(\d{1,2})\b/.exec(s);
+  if (match) return safeYmd_(+match[1], +match[2], +match[3], defaultYear);
+
+  match = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b/.exec(s);
+  if (match) {
+    const month = SCHEDULE_MONTHS[match[1].slice(0, 3).toLowerCase()];
+    if (month) return safeYmd_(match[3] ? +match[3] : defaultYear, month, +match[2], defaultYear);
+  }
+
+  match = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/.exec(s);
+  if (match) {
+    const year = Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+    return safeYmd_(year, +match[1], +match[2], defaultYear);
+  }
+  return null;
+}
+
+/** 読み取った日付が現実的かを確かめてから Date にする。 */
+function safeYmd_(year, month, day, defaultYear) {
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return null;
+  // 表の年から大きく外れていたら読み間違い。
+  if (Math.abs(year - defaultYear) > 1) return null;
+  const date = ymd_(year, month, day);
+  if (date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return date;
+}
+
+/**
+ * 発表予定表の名前を指標に対応づける。
+ *
+ * 機関の発表名は FRED の release 名とほぼ同じ文字列なので、
+ * すでに重なりを検査してある fred_release をそのまま使う。
+ * 当たらなければ、米国の指標に限って名前の名寄せも試す。
+ */
+function matchScheduleRelease_(name) {
+  const plain = scheduleReleaseName_(name);
+  return matchFredRelease_(plain) || matchEventName_(plain, null, 'US')
+      || matchFredRelease_(name) || matchEventName_(name, null, 'US');
+}
+
+const PERIOD_WORDS =
+  'January|February|March|April|May|June|July|August|September|October|November|December'
+  + '|First|Second|Third|Fourth|1st|2nd|3rd|4th|Q[1-4]';
+
+/**
+ * 発表名から、対象期間の部分を落とす。
+ *
+ * 機関の予定表は「Consumer Price Index for December 2025」のように
+ * 対象月が付く。fred_release は「^Consumer Price Index$」と端を留めて
+ * あるので（別の release まで巻き込まないため）、そのままでは当たらない。
+ *
+ * 最初に出てくる月名・四半期・西暦のところで切り、手前に残った
+ * 「for」「,」「-」といったつなぎを落とす。指標名そのものに月名や
+ * 西暦が入ることはないので、これで名前だけが残る。
+ */
+function scheduleReleaseName_(name) {
+  const cut = new RegExp('\\b(?:' + PERIOD_WORDS + '|\\d{4})\\b', 'i').exec(String(name));
+  const head = cut ? String(name).slice(0, cut.index) : String(name);
+  return head
+    .replace(/[\s,;:\u2013\u2014-]+$/, '')
+    .replace(/\s+(?:for|in|of)$/i, '')
+    .replace(/[\s,;:\u2013\u2014-]+$/, '')
+    .replace(/\s*\($/, '')
+    .trim();
+}
+
+/** タグと実体参照を落として、素のテキストにする。 */
+function plainText_(html) {
+  return String(html)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#(\d+);/g, function (_, code) { return String.fromCharCode(Number(code)); })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ═══════════════════════════════════════════════════════════
 // 08_fomc_auto.js
 // ═══════════════════════════════════════════════════════════
@@ -2833,10 +3171,16 @@ function downSources_() { return Object.keys(SOURCE_DOWN_); }
  */
 function collectEvents_(ctx) {
   resetSourceHealth_();
+  resetScheduleMemo_();
   const providers = [];
   if (CONFIG.providers.rules) providers.push({ name: 'rules', run: providerRules_ });
   if (CONFIG.providers.fomc) providers.push({ name: 'fomc', run: providerFomc_ });
   if (CONFIG.providers.market) providers.push({ name: 'market', run: providerMarket_ });
+  // 発表機関の予定表が先。時刻を持つ唯一の一次情報なので、
+  // 他が同じ発表を持ってきても時刻はこちらが勝つ。
+  if (CONFIG.providers.officialTimes) {
+    providers.push({ name: 'official', run: providerOfficial_ });
+  }
   if (CONFIG.providers.fred) providers.push({ name: 'fred', run: providerFred_ });
   if (CONFIG.providers.earnings) providers.push({ name: 'earnings', run: providerEarnings_ });
   if (CONFIG.providers.investing) providers.push({ name: 'investing', run: providerInvesting_ });
@@ -3036,6 +3380,9 @@ function renderDescription_(event) {
   // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
   // どこまで信じてよいかを判断できるようにするため。
   lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
+  if (!event.allDay && !CONFIG.display.allDay) {
+    lines.push('時刻の根拠 ' + (TIME_LABEL[event.timeSource] || event.timeSource));
+  }
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
     .filter(function (pair) { return !!pair[1]; });
@@ -3057,10 +3404,22 @@ function renderDescription_(event) {
   // 同じ予定が組み立てられただけで説明文が変わり、更新が走ってしまうため。
   // 利用者にとって意味があるのは「日付の根拠」と「時刻が実測かどうか」で、
   // どちらも上に書いてある。
-  const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
-    ? '' : '（発表時刻は慣例値）';
-  lines.push('自動同期: ' + MARKER + timeNote);
+  lines.push('自動同期: ' + MARKER + timeNote_(event));
   return lines.join('\n');
+}
+
+/**
+ * 発表時刻の出どころの断り書き。
+ *
+ * 一次情報（発表機関の予定表）から来た時刻には何も書かない。それが当たり前。
+ * そうでないときだけ、何を見ているのかを必ず書く。とくに暫定値は、
+ * 「未確認」とはっきり言わないと、確かな時刻のように見えてしまう。
+ */
+function timeNote_(event) {
+  if (event.allDay || CONFIG.display.allDay) return '';
+  if (event.timeSource === 'official') return '';
+  if (event.timeSource === 'reported') return '（発表時刻は集計サイト由来）';
+  return '（発表時刻は未確認の暫定値）';
 }
 
 /** 週次まとめの本文。その週に何があるかの一覧だけを出す。 */
@@ -3192,6 +3551,7 @@ function toCalendarResource_(event) {
         // 情報源が一時的に落ちても、実測の時刻や発表された数値が
         // カレンダーから消えないようにするため。
         exact: event.exactTime ? '1' : '0',
+        ts: event.timeSource,
         at: event.start.toISOString(),
         a: event.actual || '',
         f: event.forecast || '',
@@ -3381,9 +3741,14 @@ function inheritFromExisting_(events, existing) {
       // 同じ日付なので、根拠だけ引き継いでよい。
       patch.confidence = props.confidence;
     }
-    if (!event.exactTime && props.exact === '1' && props.at) {
+    // 時刻も、前回より出どころの確かなものが残っていれば引き継ぐ。
+    // 発表機関の予定表が一時的に取れなかっただけで、カレンダーの時刻が
+    // 暫定値に巻き戻る、ということを避ける。
+    const storedTime = props.ts || (props.exact === '1' ? 'reported' : 'fallback');
+    if (timeRank_(storedTime) > timeRank_(event.timeSource) && props.at) {
       const remembered = new Date(props.at);
       if (!isNaN(remembered.getTime())) {
+        patch.timeSource = storedTime;
         patch.exactTime = true;
         patch.start = remembered;
         patch.end = new Date(remembered.getTime() + (event.end - event.start));
@@ -3474,7 +3839,8 @@ function eventFromResource_(item) {
     source: props.source || 'rules',
     confidence: props.confidence || 'estimated',
     allDay: allDay,
-    exactTime: props.exact === '1',
+    // ts が無いのは、この項目を持つ前に書いた予定。exact から補う。
+    timeSource: props.ts || (props.exact === '1' ? 'reported' : 'fallback'),
     actual: props.a || null,
     forecast: props.f || null,
     previous: props.p || null,
@@ -3860,6 +4226,7 @@ function sendMail_(subject, body) {
  *   uninstall()         自動実行を止める（予定は残ります）
  *   dataQuality()       いま入っているデータがどれだけ確かかを点検する
  *   verifyRules()       発表規則の当たり具合を、FRED の実績で測る
+ *   checkOfficialTimes() 発表予定表（時刻の一次情報）が読めているか確かめる
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   runTests()          日付計算などの自己テスト
  */
@@ -4324,6 +4691,52 @@ const MEETING_INDICATORS = {
 };
 
 /**
+ * 発表予定表（一次情報）を実際に読みに行って、結果をそのまま見せる。
+ *
+ * ここが取れているあいだ、カレンダーの発表時刻は機関の公表値そのもの。
+ * 取れなくなったら暫定値に落ちるので、たまにこれで確かめる。
+ */
+function checkOfficialTimes() {
+  const ctx = syncWindow_();
+  const lines = ['発表予定表（発表時刻の一次情報）', ''];
+  resetScheduleMemo_();
+
+  let officialCount = 0;
+  (CONFIG.officialSchedules || []).forEach(function (source) {
+    lines.push('■ ' + source.name);
+    scheduleYears_(ctx).forEach(function (year) {
+      const url = String(source.url || '').replace(/\{\{year\}\}/g, String(year));
+      lines.push('   ' + url);
+      const rows = fetchSchedulePage_(source, year);
+      if (rows === null) {
+        lines.push('   ❌ 読めませんでした（この機関ぶんの時刻は暫定値に落ちます）');
+        return;
+      }
+      const matched = rows.filter(function (row) { return matchScheduleRelease_(row.name); });
+      officialCount += matched.length;
+      lines.push('   ✅ ' + rows.length + ' 行 / うちカタログの指標に対応 '
+                 + matched.length + ' 件');
+      matched.slice(0, 5).forEach(function (row) {
+        const indicator = matchScheduleRelease_(row.name);
+        lines.push('      ' + dateKey_(row.date) + ' ' + row.time + '  '
+                   + indicator.name + '  ← ' + row.name);
+      });
+      if (matched.length > 5) lines.push('      …ほか ' + (matched.length - 5) + ' 件');
+    });
+    lines.push('');
+  });
+
+  if (!officialCount) {
+    lines.push('どの予定表からも指標を拾えていません。');
+    lines.push('ページの作りか URL が変わった可能性があります。');
+    lines.push('00_config.js の officialSchedules を直してください。');
+  }
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+/**
  * FOMC 日程の自動取得が実際にどう動くかを見る。
  * 公式ページの作りが変わっていないか、たまに確認するのに使う。
  */
@@ -4409,6 +4822,33 @@ function dataQuality() {
     });
   }
 
+  const byTime = { official: 0, reported: 0, fallback: 0 };
+  const fallbackBy = {};
+  events.forEach(function (event) {
+    if (event.allDay || CONFIG.display.allDay) return;
+    byTime[event.timeSource] = (byTime[event.timeSource] || 0) + 1;
+    if (event.timeSource === 'fallback') {
+      fallbackBy[event.indicatorId] = (fallbackBy[event.indicatorId] || 0) + 1;
+    }
+  });
+  lines.push('');
+  lines.push('■ 発表時刻の出どころ');
+  ['official', 'reported', 'fallback'].forEach(function (key) {
+    const bar = new Array(Math.round((byTime[key] || 0) / 2) + 1).join('■');
+    lines.push('   ' + (TIME_LABEL[key] + '            ').slice(0, 12)
+               + String(byTime[key] || 0).padStart(3) + ' 件 ' + bar);
+  });
+  const fallbackIds = Object.keys(fallbackBy).sort();
+  if (fallbackIds.length) {
+    lines.push('');
+    lines.push('   時刻を確かめられていないもの（予定に「未確認の暫定値」と出ます）');
+    fallbackIds.forEach(function (id) {
+      const indicator = indicator_(id);
+      lines.push('     ' + (indicator ? indicator.name : id) + ' × ' + fallbackBy[id] + '回');
+    });
+    lines.push('   → checkOfficialTimes() で、予定表が読めているか確かめてください。');
+  }
+
   const down = downSources_();
   if (down.length) {
     lines.push('');
@@ -4452,7 +4892,8 @@ function dataQuality() {
   } else {
     lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
   }
-  lines.push('   3. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+  lines.push('   3. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
+  lines.push('   4. verifyRules() を実行すると、発表規則の当たり具合が測れます');
 
   lines.push('');
   lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');

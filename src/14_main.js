@@ -9,6 +9,7 @@
  *   uninstall()         自動実行を止める（予定は残ります）
  *   dataQuality()       いま入っているデータがどれだけ確かかを点検する
  *   verifyRules()       発表規則の当たり具合を、FRED の実績で測る
+ *   checkOfficialTimes() 発表予定表（時刻の一次情報）が読めているか確かめる
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   runTests()          日付計算などの自己テスト
  */
@@ -473,6 +474,52 @@ const MEETING_INDICATORS = {
 };
 
 /**
+ * 発表予定表（一次情報）を実際に読みに行って、結果をそのまま見せる。
+ *
+ * ここが取れているあいだ、カレンダーの発表時刻は機関の公表値そのもの。
+ * 取れなくなったら暫定値に落ちるので、たまにこれで確かめる。
+ */
+function checkOfficialTimes() {
+  const ctx = syncWindow_();
+  const lines = ['発表予定表（発表時刻の一次情報）', ''];
+  resetScheduleMemo_();
+
+  let officialCount = 0;
+  (CONFIG.officialSchedules || []).forEach(function (source) {
+    lines.push('■ ' + source.name);
+    scheduleYears_(ctx).forEach(function (year) {
+      const url = String(source.url || '').replace(/\{\{year\}\}/g, String(year));
+      lines.push('   ' + url);
+      const rows = fetchSchedulePage_(source, year);
+      if (rows === null) {
+        lines.push('   ❌ 読めませんでした（この機関ぶんの時刻は暫定値に落ちます）');
+        return;
+      }
+      const matched = rows.filter(function (row) { return matchScheduleRelease_(row.name); });
+      officialCount += matched.length;
+      lines.push('   ✅ ' + rows.length + ' 行 / うちカタログの指標に対応 '
+                 + matched.length + ' 件');
+      matched.slice(0, 5).forEach(function (row) {
+        const indicator = matchScheduleRelease_(row.name);
+        lines.push('      ' + dateKey_(row.date) + ' ' + row.time + '  '
+                   + indicator.name + '  ← ' + row.name);
+      });
+      if (matched.length > 5) lines.push('      …ほか ' + (matched.length - 5) + ' 件');
+    });
+    lines.push('');
+  });
+
+  if (!officialCount) {
+    lines.push('どの予定表からも指標を拾えていません。');
+    lines.push('ページの作りか URL が変わった可能性があります。');
+    lines.push('00_config.js の officialSchedules を直してください。');
+  }
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+/**
  * FOMC 日程の自動取得が実際にどう動くかを見る。
  * 公式ページの作りが変わっていないか、たまに確認するのに使う。
  */
@@ -558,6 +605,33 @@ function dataQuality() {
     });
   }
 
+  const byTime = { official: 0, reported: 0, fallback: 0 };
+  const fallbackBy = {};
+  events.forEach(function (event) {
+    if (event.allDay || CONFIG.display.allDay) return;
+    byTime[event.timeSource] = (byTime[event.timeSource] || 0) + 1;
+    if (event.timeSource === 'fallback') {
+      fallbackBy[event.indicatorId] = (fallbackBy[event.indicatorId] || 0) + 1;
+    }
+  });
+  lines.push('');
+  lines.push('■ 発表時刻の出どころ');
+  ['official', 'reported', 'fallback'].forEach(function (key) {
+    const bar = new Array(Math.round((byTime[key] || 0) / 2) + 1).join('■');
+    lines.push('   ' + (TIME_LABEL[key] + '            ').slice(0, 12)
+               + String(byTime[key] || 0).padStart(3) + ' 件 ' + bar);
+  });
+  const fallbackIds = Object.keys(fallbackBy).sort();
+  if (fallbackIds.length) {
+    lines.push('');
+    lines.push('   時刻を確かめられていないもの（予定に「未確認の暫定値」と出ます）');
+    fallbackIds.forEach(function (id) {
+      const indicator = indicator_(id);
+      lines.push('     ' + (indicator ? indicator.name : id) + ' × ' + fallbackBy[id] + '回');
+    });
+    lines.push('   → checkOfficialTimes() で、予定表が読めているか確かめてください。');
+  }
+
   const down = downSources_();
   if (down.length) {
     lines.push('');
@@ -601,7 +675,8 @@ function dataQuality() {
   } else {
     lines.push('   ✅ Investing は有効（時刻と数値が入ります）');
   }
-  lines.push('   3. verifyRules() を実行すると、発表規則の当たり具合が測れます');
+  lines.push('   3. checkOfficialTimes() で、発表予定表が読めているかを確かめられます');
+  lines.push('   4. verifyRules() を実行すると、発表規則の当たり具合が測れます');
 
   lines.push('');
   lines.push('※ 影響度スコアと解説文は、データではなく作成者の判断です。');

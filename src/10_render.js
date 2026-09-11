@@ -67,6 +67,9 @@ function renderDescription_(event) {
   // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
   // どこまで信じてよいかを判断できるようにするため。
   lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
+  if (!event.allDay && !CONFIG.display.allDay) {
+    lines.push('時刻の根拠 ' + (TIME_LABEL[event.timeSource] || event.timeSource));
+  }
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
     .filter(function (pair) { return !!pair[1]; });
@@ -88,10 +91,22 @@ function renderDescription_(event) {
   // 同じ予定が組み立てられただけで説明文が変わり、更新が走ってしまうため。
   // 利用者にとって意味があるのは「日付の根拠」と「時刻が実測かどうか」で、
   // どちらも上に書いてある。
-  const timeNote = (event.allDay || CONFIG.display.allDay || event.exactTime)
-    ? '' : '（発表時刻は慣例値）';
-  lines.push('自動同期: ' + MARKER + timeNote);
+  lines.push('自動同期: ' + MARKER + timeNote_(event));
   return lines.join('\n');
+}
+
+/**
+ * 発表時刻の出どころの断り書き。
+ *
+ * 一次情報（発表機関の予定表）から来た時刻には何も書かない。それが当たり前。
+ * そうでないときだけ、何を見ているのかを必ず書く。とくに暫定値は、
+ * 「未確認」とはっきり言わないと、確かな時刻のように見えてしまう。
+ */
+function timeNote_(event) {
+  if (event.allDay || CONFIG.display.allDay) return '';
+  if (event.timeSource === 'official') return '';
+  if (event.timeSource === 'reported') return '（発表時刻は集計サイト由来）';
+  return '（発表時刻は未確認の暫定値）';
 }
 
 /** 週次まとめの本文。その週に何があるかの一覧だけを出す。 */
