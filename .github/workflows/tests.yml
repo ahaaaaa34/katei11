@@ -26,15 +26,26 @@ jobs:
       - name: 呼ばれていない関数が無いこと
         run: npm run coverage
 
+      # 性質テストは乱数で設定を振る。種を変えて回し、既定の種では
+      # たまたま通っているだけ、という状態を避ける。
+      - name: 性質テストを別の種でも回す
+        if: matrix.node-version == '22'
+        run: FUZZ_SEED=${{ github.run_number }} FUZZ_N=250 npm test
+
   # テストが本当にバグを捕まえるかを検査する。修正を1つずつ巻き戻して、
   # 対応するテストが落ちなければ失敗させる。
   mutation:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - name: 変異テスト
+        # 46 通りの変異それぞれでテスト一式を回すので、性質テストの件数は
+        # 絞る。変異の検出に必要なのは「性質が破れること」であって件数では
+        # ないため。件数を増やした探索は node ジョブの方でやっている。
+        env:
+          MUTATE_FUZZ_N: "8"
         run: python3 tools/mutate.py
