@@ -7,11 +7,13 @@
     "test": "node tests/run.js",
     "bundle": "node tools/bundle.js",
     "mutate": "python3 tools/mutate.py",
+    "mutate:check": "python3 tools/mutate.py --check",
     "coverage": "node tools/coverage.js",
     "lint": "node tools/lint.js",
+    "golden": "node tools/golden.js",
     "diff": "node tools/differential-dump.js > /tmp/econ-diff.json && python3 tools/differential.py /tmp/econ-diff.json",
     "push": "npm run bundle && clasp push",
-    "check": "npm test && npm run lint && npm run bundle"
+    "check": "npm test && npm run lint && npm run golden && npm run mutate:check && npm run bundle"
   },
   "engines": { "node": ">=18" }
 }

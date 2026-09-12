@@ -187,9 +187,58 @@ function catalogProblems_() {
                       + indicator.fred_release + '）');
       }
     }
+    // exact は「この規則の日付を、断り書き無しで出してよい」という印。
+    // 規則そのものが目安でしかない書き方に付いていたら、言い過ぎになる。
+    if (schedule.exact) {
+      if (type === 'none') {
+        problems.push(id + ': 規則が無いのに schedule.exact が付いています');
+      } else if (type === 'day_of_month') {
+        problems.push(id + ': 「毎月' + schedule.day + '日ごろ」は目安なので'
+                      + ' schedule.exact は付けられません');
+      }
+    }
   });
 
   problems.push.apply(problems, fredReleaseOverlaps_());
+  problems.push.apply(problems, matchNameOverlaps_());
+  return problems;
+}
+
+/**
+ * 名寄せの文字列が、書いた本人以外の指標に当たらないか。
+ *
+ * 当たると、別の指標の予想・結果がその予定に入りこむ。カレンダーに
+ * 嘘の数字が出る一番の近道なので、カタログを触るたびに見ておく。
+ *
+ * ただし「速報と確報で発表名が同じ」のように、**名前だけでは分けられず
+ * 日付で分ける**のは正しい設計。その場合は、自分の規則が示す日を渡せば
+ * 自分に戻ってくるはずなので、そこまで確かめてから問題とする。
+ */
+function matchNameOverlaps_() {
+  const problems = [];
+  INDICATORS.forEach(function (indicator) {
+    (indicator.match || []).forEach(function (pattern) {
+      // 正規表現の記号を含むものは、そのまま発表名として試せない。
+      if (typeof pattern !== 'string' || /[\\^$.*+?()[\]{}|]/.test(pattern)) return;
+      // 自分のパターンは必ず自分に当たる。当たらないなら、より具体的な
+      // 別の指標に取られている。
+      const blind = matchEventName_(pattern, null, indicator.country);
+      if (blind && blind.id === indicator.id) return;
+
+      // 日付で分けられるなら正しい。自分の規則が示す日で確かめる。
+      const days = ruleDates_(indicator.schedule,
+                              ymd_(2026, 1, 1), ymd_(2026, 12, 31));
+      const resolves = days.length > 0 && days.every(function (day) {
+        const hit = matchEventName_(pattern, day, indicator.country);
+        return !!hit && hit.id === indicator.id;
+      });
+      if (!resolves) {
+        problems.push('名寄せが重なっています: 「' + pattern + '」は '
+                      + indicator.id + ' のものですが '
+                      + (blind ? blind.id : '別の指標') + ' に当たります');
+      }
+    });
+  });
   return problems;
 }
 

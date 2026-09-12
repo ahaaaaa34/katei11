@@ -53,6 +53,15 @@ MUTATIONS = [
     ("手入力の会合日程を照合せず捨てる", "src/08_fomc_auto.js",
      "  return reconcileFomc_(curated, autoFomcMeetings_(curated));",
      "  return reconcileFomc_([], autoFomcMeetings_(curated));"),
+    ("値の形を確かめずに受け取る", "src/05_catalog.js",
+     "  return FIGURE_SHAPE.test(value) ? value : null;", "  return value;"),
+    ("リンク先を素で繋ぐ", "src/07_providers_net.js",
+     "    const safePath = href && /^\\/(?!\\/)[\\w\\-./?=&%#]*$/.test(href[1]) ? href[1] : null;",
+     "    const safePath = href ? href[1] : null;"),
+    ("同じ指標の埋め尽くしを許す", "src/09_collect.js",
+     "    found = dropImplausibleFloods_(found, provider.name);", ""),
+    ("埋め尽くしを、日付でなく件数で数える", "src/09_collect.js",
+     "    const count = Object.keys(dates).length;", "    const count = group.length;"),
     ("SQ を第3金曜に固定する", "src/06_providers.js",
      "    const thirdFriday = expiryDay_(year, month);",
      "    const thirdFriday = nthWeekday_(year, month, WEEKDAY_NUM.fri, 3);"),
@@ -81,8 +90,10 @@ MUTATIONS = [
     ("週次まとめを送った週を控えない", "src/14_main.js",
      "  if (prop_(PROP_LAST_DIGEST_WEEK) === thisWeek) return false;", ""),
     ("設定が壊れていたら showStatus を落とす", "src/14_main.js",
+     "function showStatus() {\n"
      "  const problems = configProblems_();\n"
      "  if (problems.length) {",
+     "function showStatus() {\n"
      "  const problems = [];\n"
      "  if (problems.length) {"),
     ("カレンダー側の書き換えに気づかない", "src/11_sync.js",
@@ -102,8 +113,8 @@ MUTATIONS = [
     ("振替で前年に落ちた元日も、その年の表に残す", "src/04_schedule.js",
      "  if (newYear.getUTCFullYear() === year) out[dateKey_(newYear)] = '元日';",
      "  out[dateKey_(newYear)] = '元日';"),
-    ("型の名前にプロトタイプの鍵を通す", "src/05_catalog.js",
-     "  return typeof name === 'string'\n"
+    ("型の名前にプロトタイプの鍵を通す", "src/03_util.js",
+     "  return !!table && typeof name === 'string'\n"
      "      && Object.prototype.hasOwnProperty.call(table, name);",
      "  return !!table[name];"),
     ("外から来た文字列を切らない", "src/05_catalog.js",
@@ -209,8 +220,10 @@ MUTATIONS = [
     ("日をまたぐ予定も削除対象にする", "src/11_sync.js",
      "    if (ctx && !inPruneRange_(item, ctx)) return;", ""),
     ("曜日の綴り誤りを黙って通す", "src/04_schedule.js",
-     "  const value = WEEKDAY_NUM[String(name).toLowerCase()];\n  if (value === undefined) {",
-     "  const value = WEEKDAY_NUM[String(name).toLowerCase()];\n  if (false) {"),
+     "  const value = lookup_(WEEKDAY_NUM, String(name).toLowerCase(), undefined);\n"
+     "  if (value === undefined) {",
+     "  const value = lookup_(WEEKDAY_NUM, String(name).toLowerCase(), 4);\n"
+     "  if (false) {"),
     ("色 ID の検証をやめる", "src/14_main.js",
      "    if (!Number.isInteger(number) || number < 1 || number > 11\n"
      "        || String(number) !== String(color).trim()) {",
@@ -250,12 +263,19 @@ MUTATIONS = [
     ("推定日の間引きをやめる", "src/09_collect.js",
      "      if (Math.abs(daysBetween_(day, known[i])) <= SUPERSEDE_WINDOW_DAYS) return false;",
      ""),
+    ("名寄せの重なりを見ない", "src/14_main.js",
+     "  problems.push.apply(problems, matchNameOverlaps_());", ""),
+    ("名寄せの重なりを、日付で分かれるものまで問題にする", "src/14_main.js",
+     "      const resolves = days.length > 0 && days.every(function (day) {",
+     "      const resolves = false && days.every(function (day) {"),
+    ("確定の印の矛盾を見ない", "src/14_main.js",
+     "    if (schedule.exact) {", "    if (false) {"),
 ]
 
 RESULT = re.compile(r"(\d+) passed, (\d+) failed")
 
 
-# 性質テストは件数を減らして回す。44 通りの変異それぞれで 90 件を
+# 性質テストは件数を減らして回す。変異ひとつごとに 90 件を
 # 回すと 20 分を超えてしまう。変異の検出に必要なのは「性質が破れること」
 # であって件数ではないので、ここでは少なめにする。
 FUZZ_CASES = os.environ.get("MUTATE_FUZZ_N", "20")
@@ -306,8 +326,48 @@ def selected(argv):
     return picked
 
 
+def check_targets():
+    """変異の当て先が、いまのソースにまだ在るかだけを見る（数秒で終わる）。
+
+    修正した場所を後から書き換えると、変異の定義だけが古いまま残る。
+    そうなると「⚠️ 対象コードが見つからない」は 30 分の全件実行でしか
+    出てこないので、実際に何度も見落とした。ここだけを切り出して、
+    lint と同じ速さで回せるようにしておく。
+    """
+    cache = {}
+    stale = []
+    for name, path, old, _ in MUTATIONS:
+        if path not in cache:
+            try:
+                cache[path] = open(path, encoding="utf-8").read()
+            except OSError as err:
+                print(f"⚠️  ファイルが無い  {path}  ({name}): {err}")
+                stale.append(name)
+                continue
+        source = cache[path]
+        hits = source.count(old)
+        if hits == 0:
+            print(f"⚠️  当て先が見つからない  {name}  ({path})")
+            stale.append(name)
+        elif hits > 1:
+            # 置換は 1 箇所目だけ。狙いと違う場所に当たりうる。
+            print(f"⚠️  当て先が {hits} 箇所ある  {name}  ({path})")
+            stale.append(name)
+    print()
+    if stale:
+        print(f"{len(stale)} 件の変異が、いまのソースに当たりません: " + ", ".join(stale))
+        print("変異の定義（tools/mutate.py）を、直した場所に合わせ直してください。")
+        return 1
+    print(f"全 {len(MUTATIONS)} 件の変異が、いまのソースに当たります")
+    return 0
+
+
 def main():
-    targets = selected(sys.argv[1:])
+    argv = sys.argv[1:]
+    if "--check" in argv:
+        return check_targets()
+
+    targets = selected(argv)
     if not targets:
         return 1
 

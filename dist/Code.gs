@@ -177,7 +177,16 @@ const MANAGED_VALUE = '1';
  * 書式は tests/run.js の「指標カタログ」が検証しています。
  *
  * impact: ナスダック100への影響度 (0-100)。S>=90 / A>=75 / B>=55 / C<55
- * schedule.exact: true なら規則が確定的、false なら概算（FRED が上書きする）
+ * schedule.exact: その規則の日付を、断り書き無しでカレンダーに出してよいか。
+ *
+ *   true  … 発表元がその規則を明言していて、まず外れない
+ *            （毎週木曜の新規失業保険、第1・第3営業日の ISM など）
+ *   false … 規則は当たることが多いが、こちらの推測にすぎない。
+ *            件名に「(予定日未確定)」、説明に断り書きが付く。
+ *
+ *   「計算が一意に決まるか」ではなく「外れたときに黙っていてよいか」で
+ *   決めます。規則が一意でも、発表元が約束していないなら false のままに
+ *   してください（一次情報が取れれば、そちらが上書きします）。
  *
  * time: 発表時刻 (既定は America/New_York。tz を書けば変えられる)
  *
@@ -1722,6 +1731,27 @@ const MAX_FIGURE_CHARS = 40;
 const MAX_NOTE_CHARS = 3000;
 const MAX_PERIOD_CHARS = 60;
 
+/**
+ * 「値」として受け取ってよい形か。
+ *
+ * 予想値・前回値・結果値は、取得先の欄をそのまま読んでいる。そこは
+ * カレンダーの**件名に出る**ので、先方が壊れたり乗っ取られたりすると、
+ * 利用者の予定表に任意の文章やリンクを置けてしまう。
+ * 数字・記号・単位だけを通し、それ以外は値が無かったものとして扱う。
+ *
+ *   通す   0.2% / -0.1% / 215K / 1.5M / $1.20 / 1,234 / 49.5 / 3.25pts
+ *   通さない  当選！ https://… / 口座番号を入力してください / <a href=…>
+ */
+const FIGURE_SHAPE =
+  /^[<>≈~]?\s*[-+\u2212]?\s*[¥$€£]?\s*\d[\d,]*(\.\d+)?\s*(%|K|M|B|T|bp|bps|pt|pts)?$/i;
+
+function figureOrNull_(text) {
+  if (text === null || text === undefined) return null;
+  const value = String(text).trim();
+  if (!value) return null;
+  return FIGURE_SHAPE.test(value) ? value : null;
+}
+
 function clip_(text, limit) {
   if (text === null || text === undefined) return null;
   const s = String(text);
@@ -1746,9 +1776,11 @@ function makeEvent_(fields) {
     timeSource: hasKey_(TIME_RANK, fields.timeSource) ? fields.timeSource
       : (fields.exactTime ? 'reported' : 'fallback'),
     period: fields.period ? clip_(fields.period, MAX_PERIOD_CHARS) : null,
-    actual: fields.actual ? clip_(fields.actual, MAX_FIGURE_CHARS) : null,
-    forecast: fields.forecast ? clip_(fields.forecast, MAX_FIGURE_CHARS) : null,
-    previous: fields.previous ? clip_(fields.previous, MAX_FIGURE_CHARS) : null,
+    // 値は「値の形」をしているものだけ。件名に出る場所なので、
+    // 取得先が壊れても任意の文章が載らないようにする。
+    actual: figureOrNull_(clip_(fields.actual, MAX_FIGURE_CHARS)),
+    forecast: figureOrNull_(clip_(fields.forecast, MAX_FIGURE_CHARS)),
+    previous: figureOrNull_(clip_(fields.previous, MAX_FIGURE_CHARS)),
     note: fields.note ? clip_(fields.note, MAX_NOTE_CHARS) : '',
     url: fields.url || null,
     extra: fields.extra || {},
@@ -2345,7 +2377,7 @@ function earningsEvent_(day, row, tickers) {
   const session = EARNINGS_SESSIONS[row.time] || EARNINGS_SESSIONS['time-not-supplied'];
   const start = zonedTime_(day, session.time, ET);
   const company = String(row.name || symbol).trim();
-  const estimate = String(row.epsForecast || '').trim();
+  const estimate = figureOrNull_(String(row.epsForecast || '').trim());
 
   return makeEvent_({
     indicatorId: 'earnings_' + symbol,
@@ -2454,6 +2486,9 @@ function parseInvestingRows_(html) {
     const name = pickText_(body, /<td[^>]*class="[^"]*\bevent\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
     if (!name) continue;
     const href = /<a[^>]+href="([^"]+)"/.exec(body);
+    // 先方のページ内のパスだけを受け取る。素で繋ぐと、別の宛先に
+    // 差し替えられたり、壊れた URL がカレンダーのリンクになる。
+    const safePath = href && /^\/(?!\/)[\w\-./?=&%#]*$/.test(href[1]) ? href[1] : null;
     rows.push({
       datetime: match[1],
       name: name,
@@ -2461,7 +2496,7 @@ function parseInvestingRows_(html) {
       actual: pickText_(body, /id="eventActual_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       forecast: pickText_(body, /id="eventForecast_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       previous: pickText_(body, /id="eventPrevious_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
-      url: href ? 'https://www.investing.com' + href[1] : null,
+      url: safePath ? 'https://www.investing.com' + safePath : null,
     });
   }
   return rows;
@@ -3329,6 +3364,7 @@ function collectEvents_(ctx) {
       markSourceDown_(provider.name, String(err));
       return;
     }
+    found = dropImplausibleFloods_(found, provider.name);
     log_(provider.name + ': ' + found.length + ' 件');
     raw = raw.concat(found);
   });
@@ -3340,6 +3376,67 @@ function collectEvents_(ctx) {
     if (a.impact !== b.impact) return b.impact - a.impact;
     return a.indicatorId < b.indicatorId ? -1 : 1;
   });
+}
+
+/**
+ * ひとつの指標が、ありえない回数で送られてきたら、その指標ぶんを丸ごと捨てる。
+ *
+ * 取得先が壊れた（あるいは乗っ取られた）とき、同じ指標を毎日ぶん送りつければ
+ * カレンダーを埋め尽くせる。米国の統計で、30日のうちに何度も出るものは無い。
+ * 一部だけ拾うと「どれが本物か」が分からなくなるので、その情報源の
+ * その指標ぶんは丸ごと捨てて、他の情報源に任せる。
+ */
+function dropImplausibleFloods_(events, providerName) {
+  const byIndicator = {};
+  events.forEach(function (event) {
+    (byIndicator[event.indicatorId] = byIndicator[event.indicatorId] || []).push(event);
+  });
+
+  const rejected = {};
+  Object.keys(byIndicator).forEach(function (id) {
+    const group = byIndicator[id];
+    // 数えるのは「日付の種類」。同じ日を重ねて送ってくるのは、
+    // 埋め尽くしではなく、ただの重複（あとでまとめられる）。
+    const dates = {};
+    group.forEach(function (event) {
+      dates[dateKey_(localDate_(event.start, CONFIG.timezone))] = true;
+    });
+    const count = Object.keys(dates).length;
+    const days = spanDays_(group);
+    const months = Math.max(1, Math.ceil(days / 30));
+    const allowed = plausibleMonthlyCount_(id) * months;
+    if (count <= allowed) return;
+    rejected[id] = true;
+    log_('情報源 ' + providerName + ' が ' + id + ' を ' + days + ' 日のうちに '
+         + count + ' 日ぶん送ってきました（多くても ' + allowed
+         + ' 日ぶんのはず）。この指標ぶんは採用しません。');
+  });
+  if (!Object.keys(rejected).length) return events;
+  return events.filter(function (event) {
+    return !Object.prototype.hasOwnProperty.call(rejected, event.indicatorId);
+  });
+}
+
+/** その指標が、30日のうちに出てもおかしくない回数。 */
+function plausibleMonthlyCount_(indicatorId) {
+  const indicator = indicator_(indicatorId);
+  const schedule = (indicator && indicator.schedule) || {};
+  if (schedule.type === 'weekly') return 6;
+  if (schedule.type && schedule.type !== 'none') return 3;
+  // 発表規則を持たないもの（要人発言など）は、もともと回数が読めない。
+  // 埋め尽くしだけを止めたいので、緩めに見る。
+  return 20;
+}
+
+function spanDays_(events) {
+  let min = Infinity;
+  let max = -Infinity;
+  events.forEach(function (event) {
+    const at = event.start.getTime();
+    if (at < min) min = at;
+    if (at > max) max = at;
+  });
+  return Math.round((max - min) / 86400000) + 1;
 }
 
 /**
@@ -4606,9 +4703,58 @@ function catalogProblems_() {
                       + indicator.fred_release + '）');
       }
     }
+    // exact は「この規則の日付を、断り書き無しで出してよい」という印。
+    // 規則そのものが目安でしかない書き方に付いていたら、言い過ぎになる。
+    if (schedule.exact) {
+      if (type === 'none') {
+        problems.push(id + ': 規則が無いのに schedule.exact が付いています');
+      } else if (type === 'day_of_month') {
+        problems.push(id + ': 「毎月' + schedule.day + '日ごろ」は目安なので'
+                      + ' schedule.exact は付けられません');
+      }
+    }
   });
 
   problems.push.apply(problems, fredReleaseOverlaps_());
+  problems.push.apply(problems, matchNameOverlaps_());
+  return problems;
+}
+
+/**
+ * 名寄せの文字列が、書いた本人以外の指標に当たらないか。
+ *
+ * 当たると、別の指標の予想・結果がその予定に入りこむ。カレンダーに
+ * 嘘の数字が出る一番の近道なので、カタログを触るたびに見ておく。
+ *
+ * ただし「速報と確報で発表名が同じ」のように、**名前だけでは分けられず
+ * 日付で分ける**のは正しい設計。その場合は、自分の規則が示す日を渡せば
+ * 自分に戻ってくるはずなので、そこまで確かめてから問題とする。
+ */
+function matchNameOverlaps_() {
+  const problems = [];
+  INDICATORS.forEach(function (indicator) {
+    (indicator.match || []).forEach(function (pattern) {
+      // 正規表現の記号を含むものは、そのまま発表名として試せない。
+      if (typeof pattern !== 'string' || /[\\^$.*+?()[\]{}|]/.test(pattern)) return;
+      // 自分のパターンは必ず自分に当たる。当たらないなら、より具体的な
+      // 別の指標に取られている。
+      const blind = matchEventName_(pattern, null, indicator.country);
+      if (blind && blind.id === indicator.id) return;
+
+      // 日付で分けられるなら正しい。自分の規則が示す日で確かめる。
+      const days = ruleDates_(indicator.schedule,
+                              ymd_(2026, 1, 1), ymd_(2026, 12, 31));
+      const resolves = days.length > 0 && days.every(function (day) {
+        const hit = matchEventName_(pattern, day, indicator.country);
+        return !!hit && hit.id === indicator.id;
+      });
+      if (!resolves) {
+        problems.push('名寄せが重なっています: 「' + pattern + '」は '
+                      + indicator.id + ' のものですが '
+                      + (blind ? blind.id : '別の指標') + ' に当たります');
+      }
+    });
+  });
   return problems;
 }
 

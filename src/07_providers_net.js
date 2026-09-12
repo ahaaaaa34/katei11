@@ -241,7 +241,7 @@ function earningsEvent_(day, row, tickers) {
   const session = EARNINGS_SESSIONS[row.time] || EARNINGS_SESSIONS['time-not-supplied'];
   const start = zonedTime_(day, session.time, ET);
   const company = String(row.name || symbol).trim();
-  const estimate = String(row.epsForecast || '').trim();
+  const estimate = figureOrNull_(String(row.epsForecast || '').trim());
 
   return makeEvent_({
     indicatorId: 'earnings_' + symbol,
@@ -350,6 +350,9 @@ function parseInvestingRows_(html) {
     const name = pickText_(body, /<td[^>]*class="[^"]*\bevent\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
     if (!name) continue;
     const href = /<a[^>]+href="([^"]+)"/.exec(body);
+    // 先方のページ内のパスだけを受け取る。素で繋ぐと、別の宛先に
+    // 差し替えられたり、壊れた URL がカレンダーのリンクになる。
+    const safePath = href && /^\/(?!\/)[\w\-./?=&%#]*$/.test(href[1]) ? href[1] : null;
     rows.push({
       datetime: match[1],
       name: name,
@@ -357,7 +360,7 @@ function parseInvestingRows_(html) {
       actual: pickText_(body, /id="eventActual_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       forecast: pickText_(body, /id="eventForecast_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
       previous: pickText_(body, /id="eventPrevious_[^"]*"[^>]*>([\s\S]*?)<\/td>/),
-      url: href ? 'https://www.investing.com' + href[1] : null,
+      url: safePath ? 'https://www.investing.com' + safePath : null,
     });
   }
   return rows;

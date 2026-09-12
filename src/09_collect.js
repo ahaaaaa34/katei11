@@ -91,6 +91,7 @@ function collectEvents_(ctx) {
       markSourceDown_(provider.name, String(err));
       return;
     }
+    found = dropImplausibleFloods_(found, provider.name);
     log_(provider.name + ': ' + found.length + ' 件');
     raw = raw.concat(found);
   });
@@ -102,6 +103,67 @@ function collectEvents_(ctx) {
     if (a.impact !== b.impact) return b.impact - a.impact;
     return a.indicatorId < b.indicatorId ? -1 : 1;
   });
+}
+
+/**
+ * ひとつの指標が、ありえない回数で送られてきたら、その指標ぶんを丸ごと捨てる。
+ *
+ * 取得先が壊れた（あるいは乗っ取られた）とき、同じ指標を毎日ぶん送りつければ
+ * カレンダーを埋め尽くせる。米国の統計で、30日のうちに何度も出るものは無い。
+ * 一部だけ拾うと「どれが本物か」が分からなくなるので、その情報源の
+ * その指標ぶんは丸ごと捨てて、他の情報源に任せる。
+ */
+function dropImplausibleFloods_(events, providerName) {
+  const byIndicator = {};
+  events.forEach(function (event) {
+    (byIndicator[event.indicatorId] = byIndicator[event.indicatorId] || []).push(event);
+  });
+
+  const rejected = {};
+  Object.keys(byIndicator).forEach(function (id) {
+    const group = byIndicator[id];
+    // 数えるのは「日付の種類」。同じ日を重ねて送ってくるのは、
+    // 埋め尽くしではなく、ただの重複（あとでまとめられる）。
+    const dates = {};
+    group.forEach(function (event) {
+      dates[dateKey_(localDate_(event.start, CONFIG.timezone))] = true;
+    });
+    const count = Object.keys(dates).length;
+    const days = spanDays_(group);
+    const months = Math.max(1, Math.ceil(days / 30));
+    const allowed = plausibleMonthlyCount_(id) * months;
+    if (count <= allowed) return;
+    rejected[id] = true;
+    log_('情報源 ' + providerName + ' が ' + id + ' を ' + days + ' 日のうちに '
+         + count + ' 日ぶん送ってきました（多くても ' + allowed
+         + ' 日ぶんのはず）。この指標ぶんは採用しません。');
+  });
+  if (!Object.keys(rejected).length) return events;
+  return events.filter(function (event) {
+    return !Object.prototype.hasOwnProperty.call(rejected, event.indicatorId);
+  });
+}
+
+/** その指標が、30日のうちに出てもおかしくない回数。 */
+function plausibleMonthlyCount_(indicatorId) {
+  const indicator = indicator_(indicatorId);
+  const schedule = (indicator && indicator.schedule) || {};
+  if (schedule.type === 'weekly') return 6;
+  if (schedule.type && schedule.type !== 'none') return 3;
+  // 発表規則を持たないもの（要人発言など）は、もともと回数が読めない。
+  // 埋め尽くしだけを止めたいので、緩めに見る。
+  return 20;
+}
+
+function spanDays_(events) {
+  let min = Infinity;
+  let max = -Infinity;
+  events.forEach(function (event) {
+    const at = event.start.getTime();
+    if (at < min) min = at;
+    if (at > max) max = at;
+  });
+  return Math.round((max - min) / 86400000) + 1;
 }
 
 /**

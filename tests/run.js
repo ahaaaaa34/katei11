@@ -2947,6 +2947,246 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 17周目: 情報源が壊れた／乗っ取られたとき、カレンダーに何を書き込めるか。
+// カレンダーは毎日目に入る場所なので、そこに任意の文字列を置けるなら実害になる。
+// ---------------------------------------------------------------------------
+suite('取得先から、値でないものを受け取らない', () => {
+  function investing(rowsHtml) {
+    const api = loadGas({
+      Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ data: rowsHtml }) }) },
+    });
+    api.CONFIG.providers.investing = true;
+    return api;
+  }
+  const row = (value, href) => '<tr data-event-datetime="2026/09/11 12:45:00">'
+    + '<td class="left flagCur noWrap">USD</td>'
+    + '<td class="left event">' + (href ? '<a href="' + href + '">' : '')
+    + 'Core CPI (MoM)' + (href ? '</a>' : '') + '</td>'
+    + '<td id="eventActual_1">' + value + '</td></tr>';
+  const ctx = { start: Y(2026, 9, 1), end: Y(2026, 10, 31), timezone: 'Asia/Tokyo' };
+
+  test('値の形をしたものだけを受け取る', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    ['0.2%', '-0.1%', '+1.3%', '215K', '1.5M', '$1.20', '1,234', '49.5', '3.25pts',
+     '<0.1%'].forEach((good) => {
+      eq(api.figureOrNull_(good), good, good + ' は値');
+    });
+    ['当選！ https://evil.example/受取', 'いますぐ確認 bit.ly/xxxx',
+     'javascript:alert(1)', '口座番号を入力してください', '0.2%<script>x</script>',
+     '<a href="x">開く</a>', '', '   ', 'N/A', 'ご確認ください'].forEach((nasty) => {
+      eq(api.figureOrNull_(nasty), null, JSON.stringify(nasty) + ' は値でない');
+    });
+  });
+
+  test('値の欄に文章を入れられても、件名に出ない', () => {
+    ['当選！ https://evil.example/受取', 'いますぐ確認 bit.ly/xxxx',
+     '口座番号を入力してください'].forEach((nasty) => {
+      const api = investing(row(nasty));
+      const e = api.providerInvesting_(ctx)[0];
+      ok(e, nasty + ': 予定そのものは出ること');
+      eq(e.actual, null, '値としては受け取らないこと');
+      const text = api.renderTitle_(e) + api.renderDescription_(e);
+      ok(!/bit\.ly|evil\.example|当選|口座番号/.test(text), text.slice(0, 80));
+    });
+  });
+
+  test('リンク先を、先方のページ内以外に向けられない', () => {
+    ['https://evil.example/phish', '//evil.example/phish', 'javascript:alert(1)',
+     'data:text/html,x', '/\\evil.example'].forEach((href) => {
+      const api = investing(row('0.2%', href));
+      const e = api.providerInvesting_(ctx)[0];
+      ok(e, href);
+      const url = e.url || '';
+      ok(!/evil\.example|javascript:|data:/.test(url), href + ' -> ' + url);
+      ok(url === '' || url.indexOf('https://www.investing.com/') === 0
+         || url.indexOf('https://www.bls.gov') === 0, href + ' -> ' + url);
+    });
+  });
+
+  test('ふつうのリンクは、そのまま使える', () => {
+    const api = investing(row('0.2%', '/economic-calendar/cpi-733'));
+    const e = api.providerInvesting_(ctx)[0];
+    eq(e.url, 'https://www.investing.com/economic-calendar/cpi-733');
+  });
+
+  test('件名は、こちらのカタログの名前しか使わない', () => {
+    const html = '<tr data-event-datetime="2026/09/11 12:45:00">'
+      + '<td class="left flagCur noWrap">USD</td>'
+      + '<td class="left event">Core CPI (MoM) ★重要なお知らせ★ こちらをご確認ください</td>'
+      + '<td id="eventActual_1">0.2%</td></tr>';
+    const api = investing(html);
+    const e = api.providerInvesting_(ctx)[0];
+    ok(api.renderTitle_(e).indexOf('重要なお知らせ') === -1, api.renderTitle_(e));
+  });
+
+  test('同じ指標を毎日ぶん送りつけられても、埋め尽くされない', () => {
+    const rows = [];
+    for (let d = 1; d <= 30; d++) {
+      rows.push('<tr data-event-datetime="2026/09/' + String(d).padStart(2, '0')
+        + ' 12:45:00"><td class="left flagCur noWrap">USD</td>'
+        + '<td class="left event">Core CPI (MoM)</td>'
+        + '<td id="eventActual_1">0.2%</td></tr>');
+    }
+    const api = investing(rows.join(''));
+    Object.assign(api.CONFIG.providers, { rules: false, fomc: false, market: false,
+                                          fred: false, earnings: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    const cpi = api.collectEvents_(ctx).filter((e) => e.indicatorId === 'us_cpi');
+    eq(cpi.length, 0, 'ありえない回数なら、その指標ぶんは丸ごと採らない');
+  });
+
+  test('同じ日を重ねて送ってくるのは、埋め尽くしではない', () => {
+    // 重複はあとでまとめられる。ここで指標ごと捨ててしまうと、
+    // ページに表が2回出ているだけでその指標が消える。
+    const one = '<tr data-event-datetime="2026/09/11 12:45:00">'
+      + '<td class="left flagCur noWrap">USD</td>'
+      + '<td class="left event">Core CPI (MoM)</td>'
+      + '<td id="eventActual_1">0.2%</td></tr>';
+    const api = investing(one + one + one + one + one + one + one + one);
+    Object.assign(api.CONFIG.providers, { rules: false, fomc: false, market: false,
+                                          fred: false, earnings: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    const cpi = api.collectEvents_(ctx).filter((e) => e.indicatorId === 'us_cpi');
+    eq(cpi.length, 1, '同じ日はまとめて1件になること');
+  });
+
+  test('毎週の指標は、毎週来ても埋め尽くし扱いしない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const weekly = [];
+    for (let w = 0; w < 8; w++) {
+      const day = api.addDays_(Y(2026, 9, 3), w * 7);
+      weekly.push(api.makeEvent_({
+        indicatorId: 'us_jobless_claims', title: 'x', impact: 75, confidence: 'official',
+        start: api.zonedTime_(day, '08:30', 'America/New_York'),
+        end: api.zonedTime_(day, '08:45', 'America/New_York'),
+      }));
+    }
+    eq(api.dropImplausibleFloods_(weekly, 'test').length, 8);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15周目: 出てくる文章の総当たり。
+// 42 指標 × 根拠4 × 時刻の出どころ3 × 終日2 × 数値の有無3 = 3024 通り。
+// ---------------------------------------------------------------------------
+suite('どの組み合わせでも、文章が壊れず・矛盾しない', () => {
+  const CONFIDENCES = ['official', 'reported', 'rule', 'estimated'];
+  const TIMES = ['official', 'reported', 'fallback'];
+  const VALUES = [['値なし', {}], ['予想だけ', { forecast: '0.3%' }],
+                  ['結果まで', { forecast: '0.3%', previous: '0.4%', actual: '0.2%' }]];
+
+  function each(api, visit) {
+    api.INDICATORS.forEach((indicator) => {
+      CONFIDENCES.forEach((confidence) => {
+        TIMES.forEach((timeSource) => {
+          [false, true].forEach((allDay) => {
+            VALUES.forEach((values) => {
+              const start = api.zonedTime_(Y(2026, 9, 11), indicator.time || '08:30',
+                                           indicator.tz || 'America/New_York');
+              const e = api.makeEvent_(Object.assign({
+                indicatorId: indicator.id, title: indicator.name, start: start,
+                end: new Date(start.getTime() + (indicator.duration || 30) * 60000),
+                impact: indicator.impact, country: indicator.country,
+                category: indicator.category, confidence: confidence,
+                timeSource: timeSource, allDay: allDay, period: '2026年8月分',
+                note: indicator.why, url: indicator.url,
+              }, values[1]));
+              visit(e, indicator.id + '/' + confidence + '/' + timeSource
+                + (allDay ? '/終日' : '') + '/' + values[0], values[1]);
+            });
+          });
+        });
+      });
+    });
+  }
+
+  test('壊れた文字列が出ない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const broken = [];
+    each(api, (e, label) => {
+      const all = api.renderTitle_(e) + '\n' + api.renderDescription_(e)
+        + '\n' + api.renderLine_(e);
+      ['[object', 'undefined', 'NaN', 'Invalid Date'].forEach((token) => {
+        if (all.indexOf(token) !== -1 && broken.length < 3) {
+          broken.push(label + ': ' + token);
+        }
+      });
+    });
+    eq(broken, []);
+  });
+
+  test('件名の「未確定」と、説明の断り書きが、根拠と一致する', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const wrong = [];
+    each(api, (e, label) => {
+      const title = api.renderTitle_(e);
+      const description = api.renderDescription_(e);
+      const saysUnconfirmed = title.indexOf('(予定日未確定)') !== -1;
+      const wantsUnconfirmed = e.confidence === 'estimated' && !e.actual;
+      if (saysUnconfirmed !== wantsUnconfirmed && wrong.length < 3) {
+        wrong.push('件名 ' + label);
+      }
+      const warns = description.indexOf('⚠️') !== -1;
+      if (warns !== (e.confidence === 'estimated') && wrong.length < 3) {
+        wrong.push('説明 ' + label);
+      }
+    });
+    eq(wrong, []);
+  });
+
+  test('時刻の断りが、時刻の出どころと一致する', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const NOTE = { official: '', reported: '（発表時刻は集計サイト由来）',
+                   fallback: '（発表時刻は未確認の暫定値）' };
+    const wrong = [];
+    each(api, (e, label) => {
+      const description = api.renderDescription_(e);
+      const footer = description.split('\n').pop();
+      if (e.allDay) {
+        if (/発表時刻は|時刻の根拠|日時    /.test(description) && wrong.length < 3) {
+          wrong.push('終日なのに時刻の話が出る: ' + label);
+        }
+      } else if (footer.indexOf(NOTE[e.timeSource]) === -1 && wrong.length < 3) {
+        wrong.push(label + ': ' + footer);
+      }
+    });
+    eq(wrong, []);
+  });
+
+  test('どれも Google が受け取れる形になる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const wrong = [];
+    each(api, (e, label) => {
+      const r = api.toCalendarResource_(e);
+      if ((r.summary.length > 1024 || r.description.length > 8192
+           || !/^[a-v0-9]{5,1024}$/.test(r.id)) && wrong.length < 3) {
+        wrong.push(label);
+      }
+    });
+    eq(wrong, []);
+  });
+
+  test('数値は、入れたら必ず表に出る', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const wrong = [];
+    each(api, (e, label, values) => {
+      const title = api.renderTitle_(e);
+      const description = api.renderDescription_(e);
+      if (values.actual && title.indexOf(values.actual) === -1 && wrong.length < 3) {
+        wrong.push('結果が件名に出ない: ' + label);
+      }
+      if (values.forecast && description.indexOf(values.forecast) === -1
+          && wrong.length < 3) {
+        wrong.push('予想が説明に出ない: ' + label);
+      }
+    });
+    eq(wrong, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 13・14周目: 利用者が気づく壊れ方を並べ、対応するテストが無いところを埋めた。
 // 通知と色は「毎日目に入るのに一度も確かめていない」部分だった。
 // ---------------------------------------------------------------------------
@@ -4215,8 +4455,13 @@ suite('長すぎる中身で、同期そのものを失敗させない', () => {
     const api = loadGas({ Calendar: fakeCalendar() });
     const huge = event(api, { indicatorId: 'us_cpi', actual: 'x'.repeat(9000),
                               forecast: 'y'.repeat(9000), note: 'z'.repeat(9000) });
-    ok(huge.actual.length <= 40, '入口で切ること: ' + huge.actual.length);
+    // 値は「値の形」でなければ受け取らないので、そもそも入らない。
+    eq([huge.actual, huge.forecast], [null, null], '値の形でないものは通さない');
     ok(huge.note.length <= 3000, huge.note.length);
+
+    // 値の形をしていても、長ければ切る
+    const long = event(api, { indicatorId: 'us_cpi', actual: '1'.repeat(9000) + '%' });
+    ok(!long.actual || long.actual.length <= 40, String(long.actual).length);
 
     const resource = api.toCalendarResource_(huge);
     ok(resource.summary.length <= 1024, '件名: ' + resource.summary.length);
@@ -4803,6 +5048,124 @@ suite('FRED の対応付けの重なり', () => {
     ok(found[0].indexOf('us_cpi') !== -1 && found[0].indexOf('x_dummy') !== -1, found[0]);
     ok(api.catalogProblems_().length > 0, 'カタログの点検でも拾われること');
     api.INDICATORS.pop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('カタログどうしの辻褄', () => {
+  test('いまのカタログに、指標どうしの食い違いは無い', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.matchNameOverlaps_(), []);
+    eq(api.catalogProblems_(), []);
+  });
+
+  test('他の指標の発表名を横取りする match を見つける', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.push({ id: 'x_steal', name: '横取り', country: 'US', category: 'other',
+                          impact: 50, time: '08:30', schedule: { type: 'none' },
+                          match: ['consumer price index'] });
+    const found = api.matchNameOverlaps_();
+    eq(found.length, 1, JSON.stringify(found));
+    ok(found[0].indexOf('x_steal') !== -1 && found[0].indexOf('us_cpi') !== -1, found[0]);
+    ok(api.catalogProblems_().indexOf(found[0]) !== -1,
+       'カタログの点検からも拾われること');
+    api.INDICATORS.pop();
+  });
+
+  test('名前が同じでも、日付で分かれるなら問題にしない', () => {
+    // ミシガン大の速報と確報は発表名が同じ。第2金曜と最終金曜で分ける。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const name = 'michigan consumer sentiment';
+    eq(api.matchEventName_(name, Y(2026, 9, 11), 'US').id, 'us_umich_prelim');
+    eq(api.matchEventName_(name, Y(2026, 9, 25), 'US').id, 'us_umich_final');
+    eq(api.matchNameOverlaps_().filter((p) => p.indexOf(name) !== -1), []);
+  });
+
+  test('「毎月何日ごろ」に確定の印は付けられない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.indicator_('us_cpi').schedule.exact = true;
+    ok(api.catalogProblems_().some((p) => p.indexOf('us_cpi') === 0),
+       JSON.stringify(api.catalogProblems_()));
+    api.indicator_('us_cpi').schedule.exact = false;
+  });
+
+  test('規則が無いのに確定の印が付いていたら知らせる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.indicator_('us_fomc_rate').schedule.exact = true;
+    ok(api.catalogProblems_().some((p) => p.indexOf('us_fomc_rate') === 0),
+       JSON.stringify(api.catalogProblems_()));
+    delete api.indicator_('us_fomc_rate').schedule.exact;
+  });
+
+  test('確定の印は、発表元が約束している規則にだけ付いている', () => {
+    // 中身そのものの見張り。増やすときは一次情報を確かめてから。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.INDICATORS.filter((i) => (i.schedule || {}).exact).map((i) => i.id).sort(),
+       ['us_conf_board_confidence', 'us_ism_mfg', 'us_ism_services', 'us_jobless_claims']);
+  });
+
+  test('米国外の指標には時差が、米国の指標には時差が無い', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.forEach((i) => {
+      if (i.country === 'US') ok(!i.tz, i.id + ' に時差が書かれている');
+      else ok(!!i.tz, i.id + ' に時差が無い');
+    });
+  });
+
+  test('FRED の対応付けを持つ指標は、FRED が落ちても出せる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.forEach((i) => {
+      if (!i.fred_release) return;
+      ok((i.schedule || {}).type && i.schedule.type !== 'none',
+         i.id + ': FRED 頼みで、自前の規則が無い');
+    });
+  });
+
+  test('発表時刻は、その国の営業時間に収まっている', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.forEach((i) => {
+      if (!i.time) return;
+      const hour = Number(String(i.time).split(':')[0]);
+      ok(hour >= 6 && hour <= 20, i.id + ' の発表時刻が現地の営業時間外: ' + i.time);
+    });
+  });
+
+  test('対象期間のずれが、発表日と釣り合っている', () => {
+    // 月初に出るものほど、対象は古い月になる。逆なら書き間違い。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.forEach((i) => {
+      if (i.period_offset === undefined) return;
+      const s = i.schedule || {};
+      let day = null;
+      if (s.type === 'day_of_month') day = s.day;
+      else if (s.type === 'nth_business_day') day = s.n > 0 ? s.n * 1.4 : 30;
+      else if (s.type === 'nth_weekday') day = s.n > 0 ? s.n * 7 - 3 : 27;
+      if (day === null) return;
+      if (day <= 10) ok(i.period_offset <= -1, i.id + ': 月初の発表なのに対象が当月寄り');
+      if (day >= 20) ok(i.period_offset > -2, i.id + ': 月末の発表なのに対象が古すぎる');
+    });
+  });
+
+  test('指標名が重なっていない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const seen = {};
+    api.INDICATORS.forEach((i) => {
+      ok(!seen[i.name], '指標名が重複: ' + i.name + ' (' + seen[i.name] + ' と ' + i.id + ')');
+      seen[i.name] = i.id;
+    });
+  });
+
+  test('影響度の大小が、指標の重さと合っている', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const of = (id) => api.indicator_(id).impact;
+    [['us_cpi', 'us_ppi'], ['us_nfp', 'us_adp'], ['us_fomc_rate', 'us_fomc_minutes'],
+     ['us_umich_prelim', 'us_umich_final'], ['us_ism_services', 'us_chicago_pmi'],
+     ['us_gdp', 'us_durable_goods'], ['us_cpi', 'us_empire_state'],
+     ['us_pce', 'us_new_home_sales'],
+    ].forEach((pair) => {
+      ok(of(pair[0]) > of(pair[1]),
+         pair[0] + '(' + of(pair[0]) + ') は ' + pair[1] + '(' + of(pair[1]) + ') より重いはず');
+    });
   });
 });
 

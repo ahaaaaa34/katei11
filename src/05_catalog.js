@@ -225,6 +225,27 @@ const MAX_FIGURE_CHARS = 40;
 const MAX_NOTE_CHARS = 3000;
 const MAX_PERIOD_CHARS = 60;
 
+/**
+ * 「値」として受け取ってよい形か。
+ *
+ * 予想値・前回値・結果値は、取得先の欄をそのまま読んでいる。そこは
+ * カレンダーの**件名に出る**ので、先方が壊れたり乗っ取られたりすると、
+ * 利用者の予定表に任意の文章やリンクを置けてしまう。
+ * 数字・記号・単位だけを通し、それ以外は値が無かったものとして扱う。
+ *
+ *   通す   0.2% / -0.1% / 215K / 1.5M / $1.20 / 1,234 / 49.5 / 3.25pts
+ *   通さない  当選！ https://… / 口座番号を入力してください / <a href=…>
+ */
+const FIGURE_SHAPE =
+  /^[<>≈~]?\s*[-+\u2212]?\s*[¥$€£]?\s*\d[\d,]*(\.\d+)?\s*(%|K|M|B|T|bp|bps|pt|pts)?$/i;
+
+function figureOrNull_(text) {
+  if (text === null || text === undefined) return null;
+  const value = String(text).trim();
+  if (!value) return null;
+  return FIGURE_SHAPE.test(value) ? value : null;
+}
+
 function clip_(text, limit) {
   if (text === null || text === undefined) return null;
   const s = String(text);
@@ -249,9 +270,11 @@ function makeEvent_(fields) {
     timeSource: hasKey_(TIME_RANK, fields.timeSource) ? fields.timeSource
       : (fields.exactTime ? 'reported' : 'fallback'),
     period: fields.period ? clip_(fields.period, MAX_PERIOD_CHARS) : null,
-    actual: fields.actual ? clip_(fields.actual, MAX_FIGURE_CHARS) : null,
-    forecast: fields.forecast ? clip_(fields.forecast, MAX_FIGURE_CHARS) : null,
-    previous: fields.previous ? clip_(fields.previous, MAX_FIGURE_CHARS) : null,
+    // 値は「値の形」をしているものだけ。件名に出る場所なので、
+    // 取得先が壊れても任意の文章が載らないようにする。
+    actual: figureOrNull_(clip_(fields.actual, MAX_FIGURE_CHARS)),
+    forecast: figureOrNull_(clip_(fields.forecast, MAX_FIGURE_CHARS)),
+    previous: figureOrNull_(clip_(fields.previous, MAX_FIGURE_CHARS)),
     note: fields.note ? clip_(fields.note, MAX_NOTE_CHARS) : '',
     url: fields.url || null,
     extra: fields.extra || {},
