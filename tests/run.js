@@ -2947,6 +2947,267 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 13・14周目: 利用者が気づく壊れ方を並べ、対応するテストが無いところを埋めた。
+// 通知と色は「毎日目に入るのに一度も確かめていない」部分だった。
+// ---------------------------------------------------------------------------
+suite('通知と色は、ランクどおりに付く', () => {
+  function resource(api, impact, over) {
+    return api.toCalendarResource_(event(api, Object.assign(
+      { indicatorId: 'us_cpi', impact: impact }, over)));
+  }
+
+  test('ランクごとに、決めた色が付く', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [[100, 'S'], [90, 'S'], [89, 'A'], [75, 'A'], [74, 'B'],
+     [55, 'B'], [54, 'C'], [0, 'C']].forEach((row) => {
+      eq(resource(api, row[0]).colorId, api.CONFIG.colors[row[1]],
+         row[0] + ' は ' + row[1] + ' ランク');
+    });
+  });
+
+  test('ランクごとに、決めた絵文字が付く', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [[98, '🔴'], [80, '🟠'], [60, '🟡'], [40, '⚪']].forEach((row) => {
+      ok(resource(api, row[0]).summary.indexOf(row[1]) === 0,
+         row[0] + ': ' + resource(api, row[0]).summary.slice(0, 4));
+    });
+  });
+
+  test('ランクごとに、決めた通知が付く', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.reminders = { S: [1440, 30], A: [30], B: [], C: [] };
+    eq(resource(api, 98).reminders.overrides.map((r) => r.minutes), [1440, 30]);
+    eq(resource(api, 80).reminders.overrides.map((r) => r.minutes), [30]);
+    eq(resource(api, 60).reminders.overrides, []);
+    eq(resource(api, 40).reminders.overrides, []);
+  });
+
+  test('カレンダーの既定の通知は、絶対に出さない', () => {
+    // ここが true だと、注目ランクの指標でも利用者の既定通知が鳴る。
+    // 「静かに載っているだけ」であってほしいので、常に false。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    [98, 80, 60, 40].forEach((impact) => {
+      eq(resource(api, impact).reminders.useDefault, false, String(impact));
+    });
+    api.CONFIG.reminders = {};
+    eq(resource(api, 98).reminders, { useDefault: false, overrides: [] },
+       '設定を消しても既定通知に戻らないこと');
+  });
+
+  test('ランクの設定が無くても落ちない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    delete api.CONFIG.reminders.B;
+    delete api.CONFIG.colors.B;
+    const r = resource(api, 60);
+    eq(r.reminders.overrides, []);
+    eq(r.colorId, undefined, '色を付けないだけ');
+  });
+
+  test('通知は Google の上限までしか付けない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.reminders.S = [1, 2, 3, 4, 5, 6, 7, 8];
+    eq(resource(api, 98).reminders.overrides.length, api.MAX_REMINDERS);
+  });
+
+  test('終日にすると、通知の意味が変わる（0時からの分数になる）', () => {
+    // 終日の予定では Google が「その日の 0 時から何分前か」で測る。
+    // 時刻を持たない以上こうなる。設定の説明にも書いてある。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.display.allDay = true;
+    const r = resource(api, 98);
+    eq(r.start.date, '2026-09-10', '終日の予定になっていること');
+    eq(r.reminders.overrides.map((m) => m.minutes), [1440, 30],
+       '分数はそのまま渡す（勝手に読み替えない）');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('このツールの持ち物以外に、手を出さない', () => {
+  function make(calendar, store) {
+    const api = loadGas({
+      Calendar: calendar, properties: store,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) },
+    });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 20;
+    api.CONFIG.window.daysBack = 5;
+    return api;
+  }
+
+  test('一覧は、目印の付いた予定しか取ってこない', () => {
+    const calls = [];
+    const calendar = fakeCalendar();
+    const original = calendar.Events.list;
+    calendar.Events.list = function (id, opts) { calls.push(opts); return original.apply(this, arguments); };
+    const api = make(calendar, { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' });
+    api.syncCalendar();
+    ok(calls.length > 0);
+    calls.forEach((opts) => {
+      eq(opts.privateExtendedProperty, 'ecal=1', '目印で絞って問い合わせること');
+    });
+  });
+
+  test('書き込みも削除も、目印の付いたものだけ', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(calendar, store).syncCalendar();
+
+    // 人の予定を、同期範囲のまん中に置く
+    calendar.events.set('手で作った予定', {
+      id: '手で作った予定', summary: '歯医者',
+      start: { dateTime: '2026-09-12T01:00:00.000Z' },
+      end: { dateTime: '2026-09-12T02:00:00.000Z' },
+      extendedProperties: { private: { memo: 'これは人のもの' } },
+    });
+    // しきい値を上げて、たくさん消える回にする
+    const api = make(calendar, store);
+    api.CONFIG.filter.exclude = api.INDICATORS.map((i) => i.id);
+    try { api.syncCalendar(); } catch (err) { /* 0 件になるので例外は想定内 */ }
+
+    const mine = calendar.events.get('手で作った予定');
+    ok(mine, '人の予定を消した');
+    eq(mine.summary, '歯医者', '人の予定を書き換えた');
+    eq(mine.extendedProperties.private.memo, 'これは人のもの');
+  });
+
+  test('removeAllEvents も、目印の付いたものだけ消す', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(calendar, store).syncCalendar();
+    calendar.events.set('人の予定', {
+      id: '人の予定', summary: '歯医者',
+      start: { dateTime: '2026-09-12T01:00:00.000Z' },
+      end: { dateTime: '2026-09-12T02:00:00.000Z' },
+      extendedProperties: { private: {} },
+    });
+    make(calendar, store).removeAllEvents();
+    eq([...calendar.events.keys()], ['人の予定'], '人の予定だけが残ること');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12周目: 古い版が書いた予定との付き合い。
+//
+// 利用者は最初に入れた版をしばらく使い、あとから新しい dist/Code.gs に
+// 貼り替える。そのときカレンダーには古い形の予定が何十件も残っている。
+// ---------------------------------------------------------------------------
+suite('古い版が書いた予定を、壊さず引き継ぐ', () => {
+  function make(calendar, store) {
+    const api = loadGas({
+      Calendar: calendar, properties: store,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) },
+    });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 20;
+    api.CONFIG.window.daysBack = 5;
+    return api;
+  }
+  function current() {
+    const calendar = fakeCalendar();
+    make(calendar, { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' }).syncCalendar();
+    return [...calendar.events.values()];
+  }
+  const shape = (items) => items.map((e) => [e.id, e.summary, JSON.stringify(e.start),
+    (e.extendedProperties.private || {}).hash].join('|')).sort().join('\n');
+
+  // その世代には無かった項目を落として、古い版が書いた姿を作る。
+  const GENERATIONS = [
+    ['目印と指標だけ', ['uid', 'source', 'hash', 'confidence', 'exact', 'at',
+                        'a', 'f', 'p', 'ts']],
+    ['uid と情報源まで', ['hash', 'confidence', 'exact', 'at', 'a', 'f', 'p', 'ts']],
+    ['内容ハッシュまで', ['confidence', 'exact', 'at', 'a', 'f', 'p', 'ts']],
+    ['日付の根拠まで', ['exact', 'at', 'a', 'f', 'p', 'ts']],
+    ['実測時刻と数値まで', ['ts']],
+  ];
+
+  test('どの世代から貼り替えても、重複せず・作り直さず・1回で落ち着く', () => {
+    const now = current();
+    GENERATIONS.forEach((gen) => {
+      const seeded = {};
+      now.forEach((item) => {
+        const copy = JSON.parse(JSON.stringify(item));
+        gen[1].forEach((key) => { delete copy.extendedProperties.private[key]; });
+        seeded[copy.id] = copy;
+      });
+      const calendar = fakeCalendar({ events: seeded });
+      const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+      const before = calendar.events.size;
+
+      const first = make(calendar, store).syncCalendar();
+      eq(first.created.length, 0, gen[0] + ': 作り直しが起きた');
+      eq(calendar.events.size, before, gen[0] + ': 件数が変わった');
+      const uids = [...calendar.events.values()]
+        .map((e) => (e.extendedProperties.private || {}).uid);
+      eq(uids.length, new Set(uids).size, gen[0] + ': 重複ができた');
+
+      const second = make(calendar, store).syncCalendar();
+      eq(second.created.length + second.updated.length + second.deleted.length, 0,
+         gen[0] + ': 2回目で落ち着かない');
+      eq(shape([...calendar.events.values()]), shape(now),
+         gen[0] + ': いまの版の姿にならない');
+    });
+  });
+
+  test('古い予定に入っていた数値と実測時刻を失わない', () => {
+    const now = current();
+    const seeded = {};
+    let target = null;
+    now.forEach((item) => {
+      const copy = JSON.parse(JSON.stringify(item));
+      const props = copy.extendedProperties.private;
+      if (props.indicator === 'us_cpi' && copy.start.dateTime) {
+        // 時刻の出どころ（ts）を持たない世代。exact=1 で実測時刻が入っている。
+        delete props.ts;
+        props.exact = '1';
+        props.a = '0.2%';
+        props.f = '0.3%';
+        props.at = new Date(new Date(copy.start.dateTime).getTime() + 15 * 60000)
+          .toISOString();
+        copy.start.dateTime = props.at;
+        copy.end.dateTime = new Date(new Date(props.at).getTime() + 30 * 60000).toISOString();
+        target = copy.id;
+      }
+      seeded[copy.id] = copy;
+    });
+    ok(target, '題材の CPI が見つかること');
+
+    const calendar = fakeCalendar({ events: seeded });
+    make(calendar, { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' }).syncCalendar();
+    const cpi = calendar.events.get(target);
+    ok(cpi, '古い形の CPI が消えた');
+    const props = cpi.extendedProperties.private;
+    eq([props.a, props.f], ['0.2%', '0.3%'], '数値が消えた');
+    eq(props.ts, 'reported', '古い exact=1 を時刻の出どころに引き継ぐこと');
+    eq(new Date(cpi.start.dateTime).getTime(),
+       new Date(seeded[target].start.dateTime).getTime(), '実測時刻が失われた');
+  });
+
+  test('ハッシュの計算方法が変わっても、作り直さない', () => {
+    const now = current();
+    const seeded = {};
+    now.forEach((item) => {
+      const copy = JSON.parse(JSON.stringify(item));
+      copy.extendedProperties.private.hash = 'むかしのけいさんけっか';
+      seeded[copy.id] = copy;
+    });
+    const calendar = fakeCalendar({ events: seeded });
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const plan = make(calendar, store).syncCalendar();
+    eq(plan.created.length, 0, '作り直した');
+    eq(plan.deleted.length, 0, '消した');
+    ok(plan.updated.length > 0, '更新して追いつくこと');
+    const second = make(calendar, store).syncCalendar();
+    eq(second.created.length + second.updated.length + second.deleted.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 11周目: 過去の壊れ方の「型」を、機械で一括して探した結果（tools/lint.js）。
 // ---------------------------------------------------------------------------
 suite('対応表は、外から来た文字列で引いても壊れない', () => {
