@@ -2947,6 +2947,255 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 10周目: 並行実行と、GAS の実行上限。
+// ---------------------------------------------------------------------------
+suite('同時に走っても、最後は同じ姿になる', () => {
+  function make(calendar, store, overrides) {
+    const api = loadGas(Object.assign({
+      Calendar: calendar, properties: store,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) },
+    }, overrides));
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 20;
+    api.CONFIG.window.daysBack = 5;
+    return api;
+  }
+  const snapshot = (calendar) => [...calendar.events.values()]
+    .map((e) => [e.id, e.summary, JSON.stringify(e.start),
+                 (e.extendedProperties.private || {}).hash].join('|')).sort().join('\n');
+
+  test('ロックがあれば、走っている最中の実行は止まる', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    let held = false;
+    const LockService = { getScriptLock: () => ({
+      tryLock: () => { if (held) return false; held = true; return true; },
+      releaseLock: () => { held = false; },
+    }) };
+
+    let inner = 'まだ';
+    const realInsert = calendar.Events.insert;
+    let first = true;
+    calendar.Events.insert = function () {
+      if (first) {
+        first = false;
+        inner = make(calendar, store, { LockService: LockService }).syncCalendar();
+      }
+      return realInsert.apply(this, arguments);
+    };
+    make(calendar, store, { LockService: LockService }).syncCalendar();
+    eq(inner, null, '割り込んだ方は何もせずに戻ること');
+  });
+
+  test('ロックが使えない環境で交互に走っても、壊れず・重複せず・落ち着く', () => {
+    // 正解（1本だけ走らせた場合）
+    const cleanCal = fakeCalendar();
+    const cleanStore = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(cleanCal, cleanStore).syncCalendar();
+    make(cleanCal, cleanStore).syncCalendar();
+    const want = snapshot(cleanCal);
+
+    const LockService = { getScriptLock: () => { throw new Error('使えません'); } };
+    [1, 5, 11].forEach((at) => {
+      const calendar = fakeCalendar();
+      const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+      let n = 0;
+      let reentered = false;
+      const realInsert = calendar.Events.insert;
+      calendar.Events.insert = function () {
+        if (++n === at && !reentered) {
+          reentered = true;
+          make(calendar, store, { LockService: LockService }).syncCalendar();
+        }
+        return realInsert.apply(this, arguments);
+      };
+      make(calendar, store, { LockService: LockService }).syncCalendar();
+      calendar.Events.insert = realInsert;
+
+      const uids = [...calendar.events.values()]
+        .map((e) => (e.extendedProperties.private || {}).uid);
+      eq(uids.length, new Set(uids).size, at + '回目: 同じ発表が2つ入った');
+      calendar.events.forEach((item) => {
+        const props = (item.extendedProperties || {}).private || {};
+        ok(props.ecal === '1' && !!props.hash && !!item.summary,
+           at + '回目: 壊れた予定が残った ' + item.id);
+      });
+
+      const plan = make(calendar, store, { LockService: LockService }).syncCalendar();
+      eq(plan.created.length + plan.updated.length + plan.deleted.length, 0,
+         at + '回目: 落ち着かない');
+      eq(snapshot(calendar), want, at + '回目: 姿が違う');
+    });
+  });
+
+  test('6分で打ち切られても（finally も走らない）、次の回で戻る', () => {
+    const cleanCal = fakeCalendar();
+    const cleanStore = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    make(cleanCal, cleanStore).syncCalendar();
+    make(cleanCal, cleanStore).syncCalendar();
+    const want = snapshot(cleanCal);
+
+    [2, 9].forEach((at) => {
+      const calendar = fakeCalendar();
+      const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+      let n = 0;
+      const realInsert = calendar.Events.insert;
+      const KILL = { killed: true };
+      calendar.Events.insert = function () {
+        if (++n === at) throw KILL;
+        return realInsert.apply(this, arguments);
+      };
+      try { make(calendar, store).syncCalendar(); } catch (err) { /* 打ち切り */ }
+      calendar.Events.insert = realInsert;
+
+      make(calendar, store).syncCalendar();
+      const plan = make(calendar, store).syncCalendar();
+      eq(plan.created.length + plan.updated.length + plan.deleted.length, 0, at + '回目');
+      eq(snapshot(calendar), want, at + '回目: 姿が違う');
+    });
+  });
+
+  test('setup を何度押しても、自動実行は増えない', () => {
+    const scriptApp = fakeScriptApp();
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    for (let i = 0; i < 3; i++) {
+      make(calendar, store, { ScriptApp: scriptApp }).setup();
+    }
+    eq(make(calendar, store, { ScriptApp: scriptApp }).countTriggers_(), 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9周目: 入力を変えたときの、出力どうしの関係（メタモルフィック）。
+//
+// 「正解が何か」を知らなくても、「こう変えたらこうなるはず」は分かる。
+// 1回の結果だけを見ていると、「両方とも同じように間違っている」を
+// 見つけられない。
+// ---------------------------------------------------------------------------
+suite('入力を変えたときの、出力どうしの関係', () => {
+  function collect(tweak) {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 45;
+    api.CONFIG.window.daysBack = 5;
+    if (tweak) tweak(api.CONFIG, api);
+    // 基準日は「その日」そのものを渡す。localDate_ に通すと、UTC 深夜の
+    // 日付を瞬間として解釈してしまい、時差ごとに基準日がずれる。
+    const ctx = api.syncWindow_(Y(2026, 9, 11));
+    return { api: api, events: api.collectEvents_(ctx) };
+  }
+
+  // 終日の予定は「どの時差の人が見てもその日」に出すため、表示タイムゾーンの
+  // 深夜に置く。だから絶対時刻は時差で当然変わる。日付の方で見る。
+  const when = (r) => r.events.map((e) => e.indicatorId + '@'
+    + (e.allDay ? K(r.api.localDate_(e.start, r.api.CONFIG.timezone))
+                : e.start.toISOString())).sort().join('\n');
+  const ids = (r) => r.events
+    .map((e) => r.api.eventCalendarId_(e, r.api.CONFIG.timezone)).sort().join('\n');
+  const uids = (r) => r.events.map((e) => r.api.eventUid_(e, r.api.CONFIG.timezone)).sort();
+
+  test('見た目の設定は、どの発表がいつあるかを変えない', () => {
+    const base = collect();
+    [['絵文字なし', (c) => { c.display.impactEmoji = false; }],
+     ['国旗なし', (c) => { c.display.countryFlag = false; }],
+     ['スコア表示', (c) => { c.display.showScore = true; }],
+     ['終日にする', (c) => { c.display.allDay = true; }],
+     ['通知を変える', (c) => { c.reminders = { S: [5], A: [], B: [], C: [] }; }],
+     ['色を変える', (c) => { c.colors = { S: '1', A: '2', B: '3', C: '4' }; }],
+    ].forEach((row) => {
+      const got = collect(row[1]);
+      eq(when(got), when(base), row[0] + ': 中身が変わった');
+      eq(ids(got), ids(base), row[0] + ': 予定 ID が変わった');
+    });
+  });
+
+  test('タイムゾーンを変えても、発表そのものは変わらない', () => {
+    const base = collect();
+    ['America/New_York', 'UTC', 'Europe/London', 'Australia/Sydney',
+     'America/Los_Angeles'].forEach((tz) => {
+      eq(when(collect((c) => { c.timezone = tz; })), when(base), tz);
+    });
+  });
+
+  test('しきい値を下げたら、必ず上位集合になる', () => {
+    let previous = null;
+    [90, 75, 60, 55, 40, 20, 0].forEach((threshold) => {
+      const set = uids(collect((c) => { c.filter.minImpact = threshold; }));
+      if (previous) {
+        const lost = previous.filter((x) => set.indexOf(x) < 0);
+        eq(lost, [], threshold + ' まで下げたのに消えたものがある');
+      }
+      previous = set;
+    });
+  });
+
+  test('同期範囲を広げたら、必ず上位集合になる', () => {
+    let previous = null;
+    [7, 14, 30, 60, 90].forEach((ahead) => {
+      const set = uids(collect((c) => { c.window.daysAhead = ahead; }));
+      if (previous) {
+        const lost = previous.filter((x) => set.indexOf(x) < 0);
+        eq(lost, [], ahead + '日まで広げたのに消えたものがある');
+      }
+      previous = set;
+    });
+  });
+
+  test('カタログの並び順で、結果は変わらない', () => {
+    const base = collect();
+    [1, 2, 3].forEach((seed) => {
+      const got = collect((c, api) => {
+        const list = api.INDICATORS.slice();
+        for (let i = list.length - 1; i > 0; i--) {
+          const j = (i * 7 + seed * 13) % (i + 1);
+          const t = list[i]; list[i] = list[j]; list[j] = t;
+        }
+        api.INDICATORS.length = 0;
+        list.forEach((x) => api.INDICATORS.push(x));
+      });
+      eq(when(got), when(base), '並べ替え ' + seed);
+    });
+  });
+
+  test('会合日程の並び順で、結果は変わらない', () => {
+    const base = collect();
+    const got = collect((c, api) => { api.MEETINGS.fomc.meetings.reverse(); });
+    eq(when(got), when(base));
+  });
+
+  test('同じ行が2回来ても、結果は変わらない', () => {
+    const body = JSON.stringify({ release_dates: [
+      { release_name: 'Consumer Price Index', date: '2026-09-11' },
+      { release_name: 'Consumer Price Index', date: '2026-09-11' },
+      { release_name: 'Producer Price Index', date: '2026-09-16' },
+    ] });
+    const once = JSON.stringify({ release_dates: [
+      { release_name: 'Consumer Price Index', date: '2026-09-11' },
+      { release_name: 'Producer Price Index', date: '2026-09-16' },
+    ] });
+    const run = (payload) => {
+      const api = loadGas({
+        Calendar: fakeCalendar(), properties: { FRED_API_KEY: 'k' },
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                       getContentText: () => payload }) },
+      });
+      Object.assign(api.CONFIG.providers, { rules: false, fomc: false, market: false,
+                                            earnings: false, investing: false,
+                                            fomcAutoFetch: false, officialTimes: false });
+      const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+      return api.collectEvents_(ctx)
+        .map((e) => e.indicatorId + '@' + e.start.toISOString()).sort().join('\n');
+    };
+    eq(run(body), run(once), '重複した行で結果が変わってはいけない');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8周目: コードを1行ずつ読んで見つけたもの。
 // ---------------------------------------------------------------------------
 suite('SQ は、市場が閉まっている日に置かない', () => {
