@@ -159,13 +159,8 @@ const CONFIDENCE_LABEL = {
  * 通ってしまう。カレンダーに「日付の根拠 toString」と出かねないので、
  * 自分で持っている鍵かどうかで判定する。
  */
-function hasKey_(table, name) {
-  return typeof name === 'string'
-      && Object.prototype.hasOwnProperty.call(table, name);
-}
-
 function confidenceRank_(name) {
-  return hasKey_(CONFIDENCE_RANK, name) ? CONFIDENCE_RANK[name] : 0;
+  return lookup_(CONFIDENCE_RANK, name, 0);
 }
 
 /**
@@ -186,7 +181,7 @@ const TIME_LABEL = {
 };
 
 function timeRank_(name) {
-  return hasKey_(TIME_RANK, name) ? TIME_RANK[name] : 0;
+  return lookup_(TIME_RANK, name, 0);
 }
 
 /** 件名に「未確定」と出すのはこれだけ。 */
@@ -321,7 +316,7 @@ function eventContentHash_(event) {
  */
 function mergeEvent_(a, b) {
   let high = a, low = b;
-  if ((SOURCE_PRIORITY[b.source] || 0) > (SOURCE_PRIORITY[a.source] || 0)) {
+  if (lookup_(SOURCE_PRIORITY, b.source, 0) > lookup_(SOURCE_PRIORITY, a.source, 0)) {
     high = b; low = a;
   }
   const merged = Object.assign({}, high);

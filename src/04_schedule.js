@@ -346,7 +346,7 @@ function businessDayNearDay_(year, month, day) {
  * 一番たちが悪いので。
  */
 function weekdayNumber_(name) {
-  const value = WEEKDAY_NUM[String(name).toLowerCase()];
+  const value = lookup_(WEEKDAY_NUM, String(name).toLowerCase(), undefined);
   if (value === undefined) {
     throw new Error('曜日の指定が不正です: ' + name
                     + '（mon/tue/wed/thu/fri/sat/sun のいずれか）');

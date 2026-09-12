@@ -2947,6 +2947,84 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
 });
 
 // ---------------------------------------------------------------------------
+// 11周目: 過去の壊れ方の「型」を、機械で一括して探した結果（tools/lint.js）。
+// ---------------------------------------------------------------------------
+suite('対応表は、外から来た文字列で引いても壊れない', () => {
+  const POISON = ['__proto__', 'constructor', 'toString', 'hasOwnProperty',
+                  'valueOf', '__defineGetter__', 'prototype'];
+
+  test('lookup_ は、自分が持っている鍵しか返さない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const table = { a: 1, b: 2 };
+    eq(api.lookup_(table, 'a', 'なし'), 1);
+    eq(api.lookup_(table, 'z', 'なし'), 'なし');
+    POISON.forEach((name) => {
+      eq(api.lookup_(table, name, 'なし'), 'なし', name);
+      eq(api.hasKey_(table, name), false, name);
+    });
+    [0, 1, null, undefined, {}, []].forEach((name) => {
+      eq(api.lookup_(table, name, 'なし'), 'なし', JSON.stringify(name));
+    });
+  });
+
+  test('情報源の名前が型外でも、合成の順番が壊れない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      const a = event(api, { source: 'fred', confidence: 'official' });
+      const b = event(api, { source: name, confidence: 'rule' });
+      const merged = api.mergeEvent_(a, b);
+      eq(merged.confidence, 'official', name + ': 確かな方の日付が採られること');
+      eq(merged.source, 'fred', name);
+    });
+  });
+
+  test('曜日の名前が型外なら、黙って通さず落とす', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.concat(['', 'げつ', 'monday']).forEach((name) => {
+      throws(() => api.weekdayNumber_(name), '曜日の指定が不正', JSON.stringify(name));
+    });
+    eq(api.weekdayNumber_('mon'), 0);
+    eq(api.weekdayNumber_('SUN'), 6, '大文字でも読める');
+  });
+
+  test('月名が型外でも、でたらめな日付にならない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      eq(api.parseScheduleDate_(name + ' 15, 2026', 2026), null, name);
+    });
+  });
+
+  test('国コードが型外でも、国として扱わない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      eq(api.investingCountry_('<td class="flagCur">' + name + '</td>'), null, name);
+    });
+  });
+
+  test('件名と説明文に、オブジェクトの中身が出てこない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    POISON.forEach((name) => {
+      const e = event(api, { country: name, category: name });
+      const text = api.renderTitle_(e) + '\n' + api.renderDescription_(e)
+        + '\n' + api.renderLine_(e);
+      ok(text.indexOf('[object') === -1, name + ': ' + text.slice(0, 80));
+      ok(text.indexOf('function') === -1, name + ': ' + text.slice(0, 80));
+    });
+  });
+
+  test('自動実行の数が読めなくても、showStatus は落ちない', () => {
+    const api = loadGas({
+      Calendar: fakeCalendar(),
+      properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+      ScriptApp: { getProjectTriggers: () => { throw new Error('読めません'); } },
+    });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    ok(api.showStatus().indexOf('タイムゾーン') !== -1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 10周目: 並行実行と、GAS の実行上限。
 // ---------------------------------------------------------------------------
 suite('同時に走っても、最後は同じ姿になる', () => {

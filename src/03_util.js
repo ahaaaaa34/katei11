@@ -165,3 +165,23 @@ function fetchText_(url, options) {
 function pad2_(n) {
   return (n < 10 ? '0' : '') + n;
 }
+
+// ---------------------------------------------------------------------------
+// 対応表の引き方
+// ---------------------------------------------------------------------------
+/**
+ * 対応表は必ずここを通して引く。
+ *
+ * `TABLE[name]` と素で書くと、name が '__proto__' や 'toString' のときに
+ * Object の持ち物が返ってくる。外から来た文字列（保存済みの予定・取得先の
+ * ページ・利用者の設定）で引く場所が多いので、型外の値が真として通り、
+ * カレンダーに「日付の根拠 toString」のようなものが出かねない。
+ */
+function hasKey_(table, name) {
+  return !!table && typeof name === 'string'
+      && Object.prototype.hasOwnProperty.call(table, name);
+}
+
+function lookup_(table, name, fallback) {
+  return hasKey_(table, name) ? table[name] : fallback;
+}

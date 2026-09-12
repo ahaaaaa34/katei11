@@ -21,8 +21,9 @@ function stars_(impact) {
 function renderTitle_(event) {
   const parts = [];
   const tier = eventTier_(event);
-  if (CONFIG.display.impactEmoji) parts.push(TIER_EMOJI[tier]);
-  if (CONFIG.display.countryFlag && FLAGS[event.country]) parts.push(FLAGS[event.country]);
+  if (CONFIG.display.impactEmoji) parts.push(lookup_(TIER_EMOJI, tier, ''));
+  const flag = lookup_(FLAGS, event.country, '');
+  if (CONFIG.display.countryFlag && flag) parts.push(flag);
   parts.push(event.title);
   if (CONFIG.display.showScore) parts.push('[' + event.impact + ']');
   if (event.actual) parts.push('→ ' + event.actual);
@@ -49,8 +50,8 @@ function renderDescription_(event) {
   const lines = [];
 
   lines.push('影響度  ' + stars_(event.impact) + '  ' + event.impact + '/100 '
-             + '（' + tier + 'ランク・' + TIER_LABEL[tier] + '）');
-  lines.push('分類    ' + (CATEGORY_LABEL[event.category] || event.category));
+             + '（' + tier + 'ランク・' + lookup_(TIER_LABEL, tier, tier) + '）');
+  lines.push('分類    ' + lookup_(CATEGORY_LABEL, event.category, event.category));
   if (event.allDay || CONFIG.display.allDay) {
     // 米東部時間の午後に出るもの（FOMC など）は日本時間だと翌日になる。
     // どちらの日付を指しているのか分かるよう、ずれるときだけ併記する。
@@ -66,9 +67,11 @@ function renderDescription_(event) {
   if (event.period) lines.push('対象期間 ' + event.period);
   // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
   // どこまで信じてよいかを判断できるようにするため。
-  lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
+  lines.push('日付の根拠 '
+             + lookup_(CONFIDENCE_LABEL, event.confidence, event.confidence));
   if (!event.allDay && !CONFIG.display.allDay) {
-    lines.push('時刻の根拠 ' + (TIME_LABEL[event.timeSource] || event.timeSource));
+    lines.push('時刻の根拠 '
+               + lookup_(TIME_LABEL, event.timeSource, event.timeSource));
   }
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
@@ -140,7 +143,7 @@ function renderLine_(event) {
   const local = formatClock_(event.start, CONFIG.timezone);
   const when = local.short + '(' + local.weekday + ')'
              + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
-  const flag = FLAGS[event.country] || '  ';
+  const flag = lookup_(FLAGS, event.country, '  ');
   // 「~」だと指標名の一部に見えてしまうので、日本語で書く。
   const mark = isEstimated_(event) ? ' (日付未確定)' : '';
   let figures = '';
@@ -149,7 +152,7 @@ function renderLine_(event) {
   } else if (event.forecast) {
     figures = '  予想 ' + event.forecast;
   }
-  return when + ' ' + TIER_EMOJI[eventTier_(event)] + flag + ' ' + event.title + mark + figures;
+  return when + ' ' + lookup_(TIER_EMOJI, eventTier_(event), '') + flag + ' ' + event.title + mark + figures;
 }
 
 /** 週次まとめの予定かどうか。 */

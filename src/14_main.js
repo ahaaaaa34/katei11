@@ -479,7 +479,7 @@ function whyUnreachable_(indicator) {
     return providers.rules ? '' : '発表日のルール計算 (providers.rules) が無効です';
   }
 
-  const bank = MEETING_INDICATORS[indicator.id];
+  const bank = lookup_(MEETING_INDICATORS, indicator.id, null);
   if (bank) {
     if (!providers.fomc) return '中央銀行の会合 (providers.fomc) が無効です';
     if (allMeetings_(bank).length) return '';
@@ -623,7 +623,7 @@ function dataQuality() {
   lines.push('■ 日付の根拠');
   ['official', 'reported', 'rule', 'estimated'].forEach(function (key) {
     const bar = new Array(Math.round((counts[key] || 0) / 2) + 1).join('■');
-    lines.push('   ' + (CONFIDENCE_LABEL[key] + '          ').slice(0, 10)
+    lines.push('   ' + (lookup_(CONFIDENCE_LABEL, key, key) + '          ').slice(0, 10)
                + String(counts[key] || 0).padStart(3) + ' 件 ' + bar);
   });
 
@@ -794,20 +794,27 @@ function verifyRules() {
 // トリガー
 // ---------------------------------------------------------------------------
 
+/**
+ * 自動実行を仕掛ける。人が押す操作なので、失敗はそのまま知らせる。
+ * ここで黙って握りつぶすと、「設定したつもりで動いていない」という
+ * いちばん気づきにくい状態になる。
+ */
 function installTriggers() {
   uninstall();
   [CONFIG.triggers.morningHour, CONFIG.triggers.eveningHour].forEach(function (hour) {
+    // lint-ok: 失敗はそのまま知らせる（設定したつもりで動いていない、を避ける）
     ScriptApp.newTrigger(TRIGGER_HANDLER).timeBased().everyDays(1).atHour(hour).create();
   });
   log_('自動実行を設定しました（毎日 '
        + CONFIG.triggers.morningHour + '時 / ' + CONFIG.triggers.eveningHour + '時ごろ）');
 }
 
+/** 自動実行を止める。これも人が押す操作なので、失敗はそのまま知らせる。 */
 function uninstall() {
   let removed = 0;
-  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {   // lint-ok: 同上
     if (trigger.getHandlerFunction() === TRIGGER_HANDLER) {
-      ScriptApp.deleteTrigger(trigger);
+      ScriptApp.deleteTrigger(trigger);   // lint-ok: 同上
       removed++;
     }
   });
@@ -816,9 +823,15 @@ function uninstall() {
 }
 
 function countTriggers_() {
-  return ScriptApp.getProjectTriggers().filter(function (trigger) {
-    return trigger.getHandlerFunction() === TRIGGER_HANDLER;
-  }).length;
+  // showStatus から呼ばれる。困ったときに見る画面なので、ここで落ちない。
+  try {
+    return ScriptApp.getProjectTriggers().filter(function (trigger) {
+      return trigger.getHandlerFunction() === TRIGGER_HANDLER;
+    }).length;
+  } catch (err) {
+    log_('自動実行の一覧を取得できませんでした: ' + err);
+    return -1;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1084,6 +1084,26 @@ function pad2_(n) {
   return (n < 10 ? '0' : '') + n;
 }
 
+// ---------------------------------------------------------------------------
+// 対応表の引き方
+// ---------------------------------------------------------------------------
+/**
+ * 対応表は必ずここを通して引く。
+ *
+ * `TABLE[name]` と素で書くと、name が '__proto__' や 'toString' のときに
+ * Object の持ち物が返ってくる。外から来た文字列（保存済みの予定・取得先の
+ * ページ・利用者の設定）で引く場所が多いので、型外の値が真として通り、
+ * カレンダーに「日付の根拠 toString」のようなものが出かねない。
+ */
+function hasKey_(table, name) {
+  return !!table && typeof name === 'string'
+      && Object.prototype.hasOwnProperty.call(table, name);
+}
+
+function lookup_(table, name, fallback) {
+  return hasKey_(table, name) ? table[name] : fallback;
+}
+
 // ═══════════════════════════════════════════════════════════
 // 04_schedule.js
 // ═══════════════════════════════════════════════════════════
@@ -1436,7 +1456,7 @@ function businessDayNearDay_(year, month, day) {
  * 一番たちが悪いので。
  */
 function weekdayNumber_(name) {
-  const value = WEEKDAY_NUM[String(name).toLowerCase()];
+  const value = lookup_(WEEKDAY_NUM, String(name).toLowerCase(), undefined);
   if (value === undefined) {
     throw new Error('曜日の指定が不正です: ' + name
                     + '（mon/tue/wed/thu/fri/sat/sun のいずれか）');
@@ -1624,13 +1644,8 @@ const CONFIDENCE_LABEL = {
  * 通ってしまう。カレンダーに「日付の根拠 toString」と出かねないので、
  * 自分で持っている鍵かどうかで判定する。
  */
-function hasKey_(table, name) {
-  return typeof name === 'string'
-      && Object.prototype.hasOwnProperty.call(table, name);
-}
-
 function confidenceRank_(name) {
-  return hasKey_(CONFIDENCE_RANK, name) ? CONFIDENCE_RANK[name] : 0;
+  return lookup_(CONFIDENCE_RANK, name, 0);
 }
 
 /**
@@ -1651,7 +1666,7 @@ const TIME_LABEL = {
 };
 
 function timeRank_(name) {
-  return hasKey_(TIME_RANK, name) ? TIME_RANK[name] : 0;
+  return lookup_(TIME_RANK, name, 0);
 }
 
 /** 件名に「未確定」と出すのはこれだけ。 */
@@ -1786,7 +1801,7 @@ function eventContentHash_(event) {
  */
 function mergeEvent_(a, b) {
   let high = a, low = b;
-  if ((SOURCE_PRIORITY[b.source] || 0) > (SOURCE_PRIORITY[a.source] || 0)) {
+  if (lookup_(SOURCE_PRIORITY, b.source, 0) > lookup_(SOURCE_PRIORITY, a.source, 0)) {
     high = b; low = a;
   }
   const merged = Object.assign({}, high);
@@ -2374,11 +2389,11 @@ const INVESTING_COUNTRY_IDS = { US: 5, JP: 35, EU: 72, CN: 37, GB: 4, DE: 17 };
 
 function providerInvesting_(ctx) {
   const countries = (CONFIG.filter.countries || []).filter(function (code) {
-    return INVESTING_COUNTRY_IDS[code];
+    return lookup_(INVESTING_COUNTRY_IDS, code, null);
   });
   const payload = [];
   (countries.length ? countries : ['US']).forEach(function (code) {
-    payload.push('country%5B%5D=' + INVESTING_COUNTRY_IDS[code]);
+    payload.push('country%5B%5D=' + lookup_(INVESTING_COUNTRY_IDS, code, ''));
   });
   [1, 2, 3].forEach(function (level) { payload.push('importance%5B%5D=' + level); });
   payload.push('dateFrom=' + dateKey_(addDays_(ctx.start, -1)));
@@ -2456,7 +2471,7 @@ function investingCountry_(body) {
   const cell = pickText_(body, /<td[^>]*class="[^"]*\bflagCur\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
   if (!cell) return null;
   const code = (/\b([A-Z]{3})\b/.exec(cell.toUpperCase()) || [])[1];
-  return (code && INVESTING_CURRENCY_COUNTRY[code]) || null;
+  return lookup_(INVESTING_CURRENCY_COUNTRY, code, null);
 }
 
 function pickText_(html, regex) {
@@ -2733,7 +2748,7 @@ function parseScheduleDate_(text, defaultYear) {
 
   match = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b/.exec(s);
   if (match) {
-    const month = SCHEDULE_MONTHS[match[1].slice(0, 3).toLowerCase()];
+    const month = lookup_(SCHEDULE_MONTHS, match[1].slice(0, 3).toLowerCase(), 0);
     if (month) return safeYmd_(match[3] ? +match[3] : defaultYear, month, +match[2], defaultYear);
   }
 
@@ -3081,10 +3096,11 @@ function parseFomcYear_(text, year) {
   const meetings = [];
   let match;
   while ((match = re.exec(text)) !== null) {
-    const startMonth = MONTH_NAMES[match[1].toLowerCase()];
+    const startMonth = lookup_(MONTH_NAMES, match[1].toLowerCase(), 0);
     const startDay = Number(match[3]);
     const endDay = Number(match[4]);
-    let endMonth = match[2] ? MONTH_NAMES[match[2].toLowerCase()] : startMonth;
+    let endMonth = match[2]
+      ? lookup_(MONTH_NAMES, match[2].toLowerCase(), 0) : startMonth;
     // "April/May 28-1" のように月をまたぐ回。月名が1つしか無い場合でも
     // 終わりの日が始まりより小さければ翌月とみなす。
     if (!match[2] && endDay < startDay) endMonth = startMonth + 1;
@@ -3440,8 +3456,9 @@ function stars_(impact) {
 function renderTitle_(event) {
   const parts = [];
   const tier = eventTier_(event);
-  if (CONFIG.display.impactEmoji) parts.push(TIER_EMOJI[tier]);
-  if (CONFIG.display.countryFlag && FLAGS[event.country]) parts.push(FLAGS[event.country]);
+  if (CONFIG.display.impactEmoji) parts.push(lookup_(TIER_EMOJI, tier, ''));
+  const flag = lookup_(FLAGS, event.country, '');
+  if (CONFIG.display.countryFlag && flag) parts.push(flag);
   parts.push(event.title);
   if (CONFIG.display.showScore) parts.push('[' + event.impact + ']');
   if (event.actual) parts.push('→ ' + event.actual);
@@ -3468,8 +3485,8 @@ function renderDescription_(event) {
   const lines = [];
 
   lines.push('影響度  ' + stars_(event.impact) + '  ' + event.impact + '/100 '
-             + '（' + tier + 'ランク・' + TIER_LABEL[tier] + '）');
-  lines.push('分類    ' + (CATEGORY_LABEL[event.category] || event.category));
+             + '（' + tier + 'ランク・' + lookup_(TIER_LABEL, tier, tier) + '）');
+  lines.push('分類    ' + lookup_(CATEGORY_LABEL, event.category, event.category));
   if (event.allDay || CONFIG.display.allDay) {
     // 米東部時間の午後に出るもの（FOMC など）は日本時間だと翌日になる。
     // どちらの日付を指しているのか分かるよう、ずれるときだけ併記する。
@@ -3485,9 +3502,11 @@ function renderDescription_(event) {
   if (event.period) lines.push('対象期間 ' + event.period);
   // 「この日付はどこから来たのか」を必ず書く。カレンダーを見た人が、
   // どこまで信じてよいかを判断できるようにするため。
-  lines.push('日付の根拠 ' + (CONFIDENCE_LABEL[event.confidence] || event.confidence));
+  lines.push('日付の根拠 '
+             + lookup_(CONFIDENCE_LABEL, event.confidence, event.confidence));
   if (!event.allDay && !CONFIG.display.allDay) {
-    lines.push('時刻の根拠 ' + (TIME_LABEL[event.timeSource] || event.timeSource));
+    lines.push('時刻の根拠 '
+               + lookup_(TIME_LABEL, event.timeSource, event.timeSource));
   }
 
   const figures = [['予想', event.forecast], ['前回', event.previous], ['結果', event.actual]]
@@ -3559,7 +3578,7 @@ function renderLine_(event) {
   const local = formatClock_(event.start, CONFIG.timezone);
   const when = local.short + '(' + local.weekday + ')'
              + (event.allDay || CONFIG.display.allDay ? '' : ' ' + local.time);
-  const flag = FLAGS[event.country] || '  ';
+  const flag = lookup_(FLAGS, event.country, '  ');
   // 「~」だと指標名の一部に見えてしまうので、日本語で書く。
   const mark = isEstimated_(event) ? ' (日付未確定)' : '';
   let figures = '';
@@ -3568,7 +3587,7 @@ function renderLine_(event) {
   } else if (event.forecast) {
     figures = '  予想 ' + event.forecast;
   }
-  return when + ' ' + TIER_EMOJI[eventTier_(event)] + flag + ' ' + event.title + mark + figures;
+  return when + ' ' + lookup_(TIER_EMOJI, eventTier_(event), '') + flag + ' ' + event.title + mark + figures;
 }
 
 /** 週次まとめの予定かどうか。 */
@@ -4867,7 +4886,7 @@ function whyUnreachable_(indicator) {
     return providers.rules ? '' : '発表日のルール計算 (providers.rules) が無効です';
   }
 
-  const bank = MEETING_INDICATORS[indicator.id];
+  const bank = lookup_(MEETING_INDICATORS, indicator.id, null);
   if (bank) {
     if (!providers.fomc) return '中央銀行の会合 (providers.fomc) が無効です';
     if (allMeetings_(bank).length) return '';
@@ -5011,7 +5030,7 @@ function dataQuality() {
   lines.push('■ 日付の根拠');
   ['official', 'reported', 'rule', 'estimated'].forEach(function (key) {
     const bar = new Array(Math.round((counts[key] || 0) / 2) + 1).join('■');
-    lines.push('   ' + (CONFIDENCE_LABEL[key] + '          ').slice(0, 10)
+    lines.push('   ' + (lookup_(CONFIDENCE_LABEL, key, key) + '          ').slice(0, 10)
                + String(counts[key] || 0).padStart(3) + ' 件 ' + bar);
   });
 
@@ -5182,20 +5201,27 @@ function verifyRules() {
 // トリガー
 // ---------------------------------------------------------------------------
 
+/**
+ * 自動実行を仕掛ける。人が押す操作なので、失敗はそのまま知らせる。
+ * ここで黙って握りつぶすと、「設定したつもりで動いていない」という
+ * いちばん気づきにくい状態になる。
+ */
 function installTriggers() {
   uninstall();
   [CONFIG.triggers.morningHour, CONFIG.triggers.eveningHour].forEach(function (hour) {
+    // lint-ok: 失敗はそのまま知らせる（設定したつもりで動いていない、を避ける）
     ScriptApp.newTrigger(TRIGGER_HANDLER).timeBased().everyDays(1).atHour(hour).create();
   });
   log_('自動実行を設定しました（毎日 '
        + CONFIG.triggers.morningHour + '時 / ' + CONFIG.triggers.eveningHour + '時ごろ）');
 }
 
+/** 自動実行を止める。これも人が押す操作なので、失敗はそのまま知らせる。 */
 function uninstall() {
   let removed = 0;
-  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {   // lint-ok: 同上
     if (trigger.getHandlerFunction() === TRIGGER_HANDLER) {
-      ScriptApp.deleteTrigger(trigger);
+      ScriptApp.deleteTrigger(trigger);   // lint-ok: 同上
       removed++;
     }
   });
@@ -5204,9 +5230,15 @@ function uninstall() {
 }
 
 function countTriggers_() {
-  return ScriptApp.getProjectTriggers().filter(function (trigger) {
-    return trigger.getHandlerFunction() === TRIGGER_HANDLER;
-  }).length;
+  // showStatus から呼ばれる。困ったときに見る画面なので、ここで落ちない。
+  try {
+    return ScriptApp.getProjectTriggers().filter(function (trigger) {
+      return trigger.getHandlerFunction() === TRIGGER_HANDLER;
+    }).length;
+  } catch (err) {
+    log_('自動実行の一覧を取得できませんでした: ' + err);
+    return -1;
+  }
 }
 
 // ---------------------------------------------------------------------------

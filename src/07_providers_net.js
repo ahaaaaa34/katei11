@@ -297,11 +297,11 @@ const INVESTING_COUNTRY_IDS = { US: 5, JP: 35, EU: 72, CN: 37, GB: 4, DE: 17 };
 
 function providerInvesting_(ctx) {
   const countries = (CONFIG.filter.countries || []).filter(function (code) {
-    return INVESTING_COUNTRY_IDS[code];
+    return lookup_(INVESTING_COUNTRY_IDS, code, null);
   });
   const payload = [];
   (countries.length ? countries : ['US']).forEach(function (code) {
-    payload.push('country%5B%5D=' + INVESTING_COUNTRY_IDS[code]);
+    payload.push('country%5B%5D=' + lookup_(INVESTING_COUNTRY_IDS, code, ''));
   });
   [1, 2, 3].forEach(function (level) { payload.push('importance%5B%5D=' + level); });
   payload.push('dateFrom=' + dateKey_(addDays_(ctx.start, -1)));
@@ -379,7 +379,7 @@ function investingCountry_(body) {
   const cell = pickText_(body, /<td[^>]*class="[^"]*\bflagCur\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
   if (!cell) return null;
   const code = (/\b([A-Z]{3})\b/.exec(cell.toUpperCase()) || [])[1];
-  return (code && INVESTING_CURRENCY_COUNTRY[code]) || null;
+  return lookup_(INVESTING_CURRENCY_COUNTRY, code, null);
 }
 
 function pickText_(html, regex) {
@@ -656,7 +656,7 @@ function parseScheduleDate_(text, defaultYear) {
 
   match = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b/.exec(s);
   if (match) {
-    const month = SCHEDULE_MONTHS[match[1].slice(0, 3).toLowerCase()];
+    const month = lookup_(SCHEDULE_MONTHS, match[1].slice(0, 3).toLowerCase(), 0);
     if (month) return safeYmd_(match[3] ? +match[3] : defaultYear, month, +match[2], defaultYear);
   }
 

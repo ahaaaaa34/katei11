@@ -268,10 +268,11 @@ function parseFomcYear_(text, year) {
   const meetings = [];
   let match;
   while ((match = re.exec(text)) !== null) {
-    const startMonth = MONTH_NAMES[match[1].toLowerCase()];
+    const startMonth = lookup_(MONTH_NAMES, match[1].toLowerCase(), 0);
     const startDay = Number(match[3]);
     const endDay = Number(match[4]);
-    let endMonth = match[2] ? MONTH_NAMES[match[2].toLowerCase()] : startMonth;
+    let endMonth = match[2]
+      ? lookup_(MONTH_NAMES, match[2].toLowerCase(), 0) : startMonth;
     // "April/May 28-1" のように月をまたぐ回。月名が1つしか無い場合でも
     // 終わりの日が始まりより小さければ翌月とみなす。
     if (!match[2] && endDay < startDay) endMonth = startMonth + 1;
