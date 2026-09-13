@@ -26,15 +26,34 @@ def bad(kind, detail):
 # 1. 現地の壁時計 -> 絶対時刻
 # ---------------------------------------------------------------------------
 def check_zoned(rows):
+    """壁時計 -> 絶対時刻。
+
+    約束ごと:
+      ・ふつうの時刻は、その現地時刻ちょうどを指す
+      ・二度ある時刻（秋に戻る1時間）は、最初に訪れる方（fold=0）
+      ・存在しない時刻（春に飛ぶ1時間）は、**その現地の日付の中**に
+        収まる最初の瞬間。真夜中に飛ぶ地域（サンティアゴ・ハバナ）が
+        あり、素直に換算すると前日になってしまう。終日の予定が
+        1日ずれて出るので、前へ寄せる。
+    """
     for y, m, d, hhmm, tz, got in rows:
         hh, mm = (int(x) for x in hhmm.split(":"))
         naive = datetime(y, m, d, hh, mm)
         zone = ZoneInfo(tz)
-        # fold=0 が「最初に訪れる方」。JS 側も同じ約束のはず。
         want = naive.replace(tzinfo=zone).astimezone(UTC)
+
+        # 往復して同じ壁時計に戻らなければ、その時刻は存在しない
+        roundtrip = want.astimezone(zone).replace(tzinfo=None)
+        if roundtrip != naive:
+            # その日に入るまで 15 分ずつ進める（JS と同じ決め方）
+            for step in range(0, 13):
+                moved = want + timedelta(minutes=15 * step)
+                if moved.astimezone(zone).date() == date(y, m, d):
+                    want = moved
+                    break
+
         want_s = want.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         if want_s != got:
-            # 存在しない時刻（春の飛ぶ1時間）はどちらの解釈もありうるので分けて数える
             back = datetime.fromisoformat(got.replace("Z", "+00:00")).astimezone(zone)
             kind = "壁時計->絶対時刻"
             if back.replace(tzinfo=None) != naive:

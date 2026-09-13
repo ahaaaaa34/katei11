@@ -5414,6 +5414,51 @@ suite('日を進めながら動かし続ける', () => {
     ok(!api.isFinishedRecord_(item), '結果が無いなら、ただの予定として整理する');
   });
 
+  test('形の崩れた予定ひとつで、同期全体を落とさない', () => {
+    // Google から欠けた予定が返ることは無いはずだが、古い版が書いた予定・
+    // 手で作られた予定・途中で切れた応答では起こりうる。1件の形が
+    // 崩れているだけで、その日のカレンダーが丸ごと古いままになるのは割に合わない。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const broken = [
+      { name: 'start が無い', item: { id: 'ec1', end: { dateTime: '2026-09-11T13:00:00Z' } } },
+      { name: 'end が無い', item: { id: 'ec2', start: { dateTime: '2026-09-11T12:30:00Z' } } },
+      { name: 'start も end も無い', item: { id: 'ec3' } },
+      { name: 'start が空', item: { id: 'ec4', start: {}, end: {} } },
+      { name: 'dateTime が読めない',
+        item: { id: 'ec5', start: { dateTime: 'いつか' }, end: { dateTime: 'いつか' } } },
+      { name: 'date が読めない',
+        item: { id: 'ec6', start: { date: '20260911' }, end: { date: '20260912' } } },
+    ];
+    broken.forEach((row) => {
+      row.item.summary = 'こわれた予定';
+      row.item.extendedProperties = { private: { ecal: '1', indicator: 'us_cpi',
+                                                 impact: '98', source: 'rules' } };
+      let restored;
+      try { restored = api.eventFromResource_(row.item); }
+      catch (err) { ok(false, row.name + ' で投げた: ' + err.message); return; }
+      ok(restored === null || restored.start instanceof Date, row.name);
+      // 整理の判断でも投げないこと
+      try { api.keepThroughOutage_(row.item); api.isFinishedRecord_(row.item); }
+      catch (err) { ok(false, row.name + ' の整理で投げた: ' + err.message); }
+    });
+
+    // 同期の本体に混ぜても、落ちずに済むこと
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    broken.forEach((row) => calendar.events.set(row.item.id, row.item));
+    const live = loadGas({ Calendar: calendar, properties: store,
+      now: '2026-09-11T12:00:00Z',
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(live.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                           fomcAutoFetch: false, officialTimes: false });
+    let plan;
+    try { plan = live.syncCalendar(); }
+    catch (err) { ok(false, '同期が落ちた: ' + err.message); return; }
+    ok(plan.created.length > 0, '壊れた予定が混ざっていても、ふつうに書けること');
+  });
+
   test('日付が読めない予定を、記録として守ってしまわない', () => {
     const api = loadGas({ Calendar: fakeCalendar() });
     ['', 'いつか', undefined].forEach((value) => {
@@ -6098,6 +6143,93 @@ suite('情報源のページが作り替えられたら', () => {
         eq(e.timeSource, 'official', variant[0]);
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('夏時間の切替日の約束ごと', () => {
+  // ここは独立実装との突き合わせでしか見ていなかった（= npm test では
+  // 守られていなかった）。変異テストで気づいたので、条件を書き下す。
+  const wall = (api, instant, tz) => {
+    const p = api.tzParts_(instant, tz);
+    return K(Y(p.year, p.month, p.day)) + ' ' + String(p.hour).padStart(2, '0')
+      + ':' + String(p.minute).padStart(2, '0');
+  };
+
+  test('存在しない時刻は、前へ送る（後ろへ戻さない）', () => {
+    // 春に1時間飛ぶ日。02:30 は無いので 03:30 にする。01:30 にすると
+    // 頼まれた時刻より前になってしまう。
+    [['America/New_York', 2026, 3, 8, '02:30', '2026-03-08 03:30'],
+     ['America/Chicago', 2026, 3, 8, '02:30', '2026-03-08 03:30'],
+     ['Europe/Berlin', 2026, 3, 29, '02:30', '2026-03-29 03:30'],
+    ].forEach((row) => {
+      const got = wall(G, G.zonedTime_(Y(row[1], row[2], row[3]), row[4], row[0]), row[0]);
+      eq(got, row[5], row[0] + ' ' + row[4]);
+    });
+  });
+
+  test('真夜中が存在しない地域でも、その日から出ない', () => {
+    // サンティアゴとハバナは真夜中に時計が飛ぶ。素直に換算すると
+    // 前日の23時になり、**終日の予定が1日前に出る**。
+    [['America/Santiago', 2026, 9, 6], ['America/Havana', 2026, 3, 8],
+     ['America/Santiago', 2025, 9, 7], ['America/Havana', 2027, 3, 14],
+    ].forEach((row) => {
+      const day = Y(row[1], row[2], row[3]);
+      const instant = G.zonedTime_(day, '00:00', row[0]);
+      eq(K(G.localDate_(instant, row[0])), K(day), row[0] + ' の終日の起点');
+    });
+  });
+
+  test('二度ある時刻は、最初に訪れる方を採る', () => {
+    // 秋に1時間戻る日。01:30 は2回あるので、早い方（夏時間側）。
+    const first = G.zonedTime_(Y(2026, 10, 25), '01:30', 'Europe/London');
+    eq(first.toISOString(), '2026-10-25T00:30:00.000Z');
+    const berlin = G.zonedTime_(Y(2026, 10, 25), '02:30', 'Europe/Berlin');
+    eq(berlin.toISOString(), '2026-10-25T00:30:00.000Z');
+  });
+
+  test('どの時差・どの日でも、狙った現地の日付から出ない', () => {
+    // 終日の予定はここに全部乗っている。1日ずれたら黙って間違える。
+    // 掃引は重いので、変異テストでは年と地域を絞る（LONG_RUN_DAYS と同じ都合）。
+    const wide = !process.env.LONG_RUN_DAYS;
+    const zones = wide
+      ? ['America/New_York', 'Europe/Berlin', 'Asia/Tokyo', 'Australia/Sydney',
+         'Pacific/Auckland', 'America/Santiago', 'America/Havana', 'Asia/Beirut',
+         'Pacific/Kiritimati', 'Pacific/Midway', 'Australia/Lord_Howe',
+         'Europe/London', 'Asia/Tehran']
+      : ['America/New_York', 'Europe/Berlin', 'America/Santiago', 'America/Havana',
+         'Australia/Lord_Howe'];
+    const lastYear = wide ? 2028 : 2026;
+    let seen = 0;
+    let backward = 0;
+    zones.forEach((tz) => {
+      for (let year = 2026; year <= lastYear; year++) {
+        [3, 4, 9, 10, 11].forEach((month) => {
+          for (let day = 1; day <= G.lastDayOfMonth_(year, month); day++) {
+            ['00:00', '00:30', '01:30', '02:30', '08:30'].forEach((time) => {
+              seen++;
+              const at = Y(year, month, day);
+              const instant = G.zonedTime_(at, time, tz);
+              eq(K(G.localDate_(instant, tz)), K(at),
+                 tz + ' ' + K(at) + ' ' + time + ' が別の日になった');
+              const p = G.tzParts_(instant, tz);
+              const want = Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+              if (p.hour * 60 + p.minute < want) backward++;
+            });
+          }
+        });
+      }
+    });
+    ok(seen > (wide ? 10000 : 2000), '見た件数: ' + seen);
+    eq(backward, 0, '頼まれた時刻より前に置いたものがある');
+  });
+
+  test('ふつうの日は、そのままの壁時計になる', () => {
+    ['Asia/Tokyo', 'America/New_York', 'Europe/London', 'UTC', 'Asia/Kolkata']
+      .forEach((tz) => {
+        const instant = G.zonedTime_(Y(2026, 6, 15), '08:30', tz);
+        eq(wall(G, instant, tz), '2026-06-15 08:30', tz);
+      });
   });
 });
 

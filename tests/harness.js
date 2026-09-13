@@ -183,10 +183,18 @@ function fakeCalendar(seed = {}) {
   return api;
 }
 
-/** 予定リソースから絶対時刻の範囲を取り出す（終日は日付だけを持つ）。 */
+/**
+ * 予定リソースから絶対時刻の範囲を取り出す（終日は日付だけを持つ）。
+ *
+ * 形の崩れた予定（start が無い・読めない）でも落ちないこと。偽物が
+ * 本物の API より脆いと、**そういう予定を混ぜた試験ができない**。
+ * 読めないものは NaN を返し、範囲の比較で自然に外れるようにする。
+ */
 function eventSpan(item) {
   const parse = (side, fallbackHour) => {
+    if (!side || typeof side !== 'object') return NaN;
     if (side.dateTime) return new Date(side.dateTime).getTime();
+    if (!side.date) return NaN;
     // 終日イベントは表示タイムゾーンの深夜。テストは Asia/Tokyo 前提。
     return new Date(side.date + 'T' + fallbackHour + ':00+09:00').getTime();
   };

@@ -1267,19 +1267,56 @@ function tzParts_(instant, timezone) {
 }
 
 /**
- * 「その日の HH:MM（指定タイムゾーンの壁時計）」を実際の瞬間に変換する。
- * ずれの分だけ戻したあと、境界（夏時間の切替日）で答えが変わる場合に
- * もう一度補正するので、切替日でも正しい値になる。
+ * 「その日の HH:MM（指定タイムゾーンの壁時計）」を、実際の瞬間に変換する。
+ *
+ * 夏時間の切替日には、素直に引き算できない時刻が2種類ある。
+ * どちらを採るかを、ここで約束として決めておく。
+ *
+ *   二度ある時刻（秋に1時間戻る日の 01:30 など）
+ *     → **最初に訪れる方**。標準的な決め方で、その日の早い方でもある。
+ *
+ *   存在しない時刻（春に1時間飛ぶ日の 02:30 など）
+ *     → **前へ送る**（02:30 → 03:30）。後ろへ送ると 01:30 になり、
+ *       頼まれた時刻より前になってしまう。
+ *       真夜中に飛ぶ地域（サンティアゴ・ハバナ）ではこれが効いて、
+ *       「その日の 00:00」が前日の 23 時になり、**終日の予定が
+ *       1日ずれて出る**。前へ送れば、その日の 01:00 に収まる。
  */
 function zonedTime_(date, hhmm, timezone) {
   const bits = String(hhmm).split(':');
   const wall = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(),
                         parseInt(bits[0], 10), parseInt(bits[1], 10));
-  const first = tzOffsetMinutes_(new Date(wall), timezone);
-  let instant = new Date(wall - first * 60000);
-  const second = tzOffsetMinutes_(instant, timezone);
-  if (second !== first) instant = new Date(wall - second * 60000);
-  return instant;
+
+  // 切替をまたぐ前後で、そのタイムゾーンが取りうるずれを集める。
+  // 世界のずれは ±14 時間に収まるので、その幅を見れば両側が入る。
+  const offsets = [];
+  [-14 * 3600000, 0, 14 * 3600000].forEach(function (shift) {
+    const minutes = tzOffsetMinutes_(new Date(wall + shift), timezone);
+    if (offsets.indexOf(minutes) === -1) offsets.push(minutes);
+  });
+
+  // 「そのずれで置いてみて、置いた先でも同じずれになる」ものだけが本物。
+  const valid = [];
+  offsets.forEach(function (minutes) {
+    const candidate = wall - minutes * 60000;
+    if (tzOffsetMinutes_(new Date(candidate), timezone) === minutes) valid.push(candidate);
+  });
+  if (valid.length) {
+    let earliest = valid[0];
+    valid.forEach(function (ms) { if (ms < earliest) earliest = ms; });
+    return new Date(earliest);
+  }
+
+  // どれも本物でない＝存在しない時刻。切替前のずれで置くと前へ送られる。
+  // 飛ぶ幅は世界中どこでも2時間以内なので、前へ送っても その日から
+  // 出ることはない（「どの時差・どの日でも、狙った現地の日付から
+  // 出ない」で、4年×13地域ぶん確かめている）。
+  let forward = wall - offsets[0] * 60000;
+  offsets.forEach(function (minutes) {
+    const candidate = wall - minutes * 60000;
+    if (candidate > forward) forward = candidate;
+  });
+  return new Date(forward);
 }
 
 /** ある瞬間を、指定タイムゾーンでの「日付（UTC深夜の Date）」に落とす。 */

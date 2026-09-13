@@ -43,6 +43,44 @@ MUTATIONS = [
     ("決算の取得範囲を狭める", "src/07_providers_net.js",
      "  const from = addDays_(ctx.start, -1);\n  const to = addDays_(ctx.end, 1);",
      "  const from = ctx.start;\n  const to = ctx.end;"),
+    ("存在しない時刻を後ろへ送る", "src/04_schedule.js",
+     "    if (candidate > forward) forward = candidate;",
+     "    if (candidate < forward) forward = candidate;"),
+    ("二度ある時刻で、遅い方を採る", "src/04_schedule.js",
+     "    valid.forEach(function (ms) { if (ms < earliest) earliest = ms; });",
+     "    valid.forEach(function (ms) { if (ms > earliest) earliest = ms; });"),
+    ("置いた先でずれを確かめない", "src/04_schedule.js",
+     "    if (tzOffsetMinutes_(new Date(candidate), timezone) === minutes) valid.push(candidate);",
+     "    valid.push(candidate);"),
+    ("切替の前後を見ずに、その場のずれだけで決める", "src/04_schedule.js",
+     "  [-14 * 3600000, 0, 14 * 3600000].forEach(function (shift) {",
+     "  [0].forEach(function (shift) {"),
+    ("「何日ごろ」を営業日に寄せない", "src/04_schedule.js",
+     "  const forward = nextBusinessDay_(ymd_(year, month, day));\n"
+     "  if (forward.getUTCMonth() + 1 === month) return forward;",
+     "  return ymd_(year, month, day);\n"
+     "  // lint-ok: 変異テスト用（到達しない）\n"
+     "  const forward = nextBusinessDay_(ymd_(year, month, day));\n"
+     "  if (forward.getUTCMonth() + 1 === month) return forward;"),
+    ("読めない日付を Date として通す", "src/05_catalog.js",
+     "  return value instanceof Date && !isNaN(value.getTime());",
+     "  return value instanceof Date;"),
+    ("書き込む姿ではなく、生の中身でハッシュを取る", "src/11_sync.js",
+     "function resourceContentHash_(resource) {\n"
+     "  const payload = JSON.stringify([\n"
+     "    resource.summary, resource.description, resource.start, resource.end,\n"
+     "    resource.colorId || null, resource.reminders, resource.transparency,\n"
+     "    resource.source || null,\n"
+     "  ]);",
+     "function resourceContentHash_(resource) {\n"
+     "  const payload = JSON.stringify([resource.start, resource.end]);"),
+    ("形の崩れた予定で同期ごと落ちる", "src/11_sync.js",
+     "    : new Date((item.start && item.start.dateTime) || NaN);",
+     "    : new Date(item.start.dateTime);"),
+    ("死んだ発表元リンクを数えない", "src/14_main.js",
+     "      bad++;\n      seen[indicator.url] = '❌';", "      seen[indicator.url] = '❌';"),
+    ("同じ発表元リンクを何度も叩く", "src/14_main.js",
+     "    if (seen[indicator.url]) {", "    if (false) {"),
     ("真夜中の時の正規化をやめる", "src/04_schedule.js",
      "  out.hour = out.hour % 24;\n", ""),
     ("設定の検証をやめる", "src/14_main.js",

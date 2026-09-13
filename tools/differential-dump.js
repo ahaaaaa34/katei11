@@ -17,13 +17,24 @@ const out = { zoned: [], local: [], holidays: {}, market: {}, early: {},
 
 const TZS = ['Asia/Tokyo', 'America/New_York', 'UTC', 'Europe/London',
              'Australia/Sydney', 'America/Los_Angeles', 'Europe/Berlin',
-             'Asia/Shanghai', 'America/Chicago', 'Asia/Kolkata'];
-const TIMES = ['00:00', '08:30', '10:00', '13:00', '14:00', '16:15', '23:45'];
+             'Asia/Shanghai', 'America/Chicago', 'Asia/Kolkata',
+             // 真夜中に夏時間が切り替わる地域。ここを入れていなかったせいで
+             // 「その日の 00:00 が存在せず、終日の予定が前日に出る」を
+             // 長いあいだ見落としていた（28周目）。
+             'America/Santiago', 'America/Havana', 'Asia/Beirut',
+             'Pacific/Auckland', 'Australia/Lord_Howe', 'Asia/Tehran'];
+const TIMES = ['00:00', '00:30', '01:30', '02:30', '08:30', '13:00', '23:45'];
+
+// 夏時間の切替は、世界のどこかで3・4・9・10・11月に起きる。
+// その月は1日ずつ、ほかは3日おきに見る。
+const DENSE_MONTHS = [3, 4, 9, 10, 11];
 
 // --- 1. 現地の壁時計 -> 絶対時刻 ---
 for (let y = 2024; y <= 2030; y++) {
   for (let m = 1; m <= 12; m++) {
-    for (let d = 1; d <= 28; d += 3) {
+    const step = DENSE_MONTHS.indexOf(m) === -1 ? 5 : 1;
+    const last = G.lastDayOfMonth_(y, m);
+    for (let d = 1; d <= last; d += step) {
       TZS.forEach((tz) => {
         TIMES.forEach((t) => {
           const instant = G.zonedTime_(G.ymd_(y, m, d), t, tz);
