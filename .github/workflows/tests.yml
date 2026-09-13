@@ -59,13 +59,13 @@ jobs:
   # 対応するテストが落ちなければ失敗させる。
   mutation:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # 変異ひとつごとにテスト一式（400件超）を回すので、1台では
-    # 1時間を超える。飛ばし飛ばしに分けて、並べて回す。
+    timeout-minutes: 60
+    # 変異ひとつごとにテスト一式（500件超）を回すので、1台では
+    # 2時間を超える。飛ばし飛ばしに分けて、並べて回す。
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/4", "2/4", "3/4", "4/4"]
+        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
