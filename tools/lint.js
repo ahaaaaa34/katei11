@@ -18,6 +18,12 @@
  *         素通りする（4周目）。
  *   E 囲われていない外部サービス呼び出し
  *       → ひとつの情報源が落ちただけで同期全体が止まる。
+ *   F Apps Script に無いものを使っている
+ *       → Node のテストは通るが、貼り付けた瞬間に全部が動かなくなる。
+ *         テストは Node で回しているので、ここで見るしかない（23周目）。
+ *   G トップレベルの名前の衝突
+ *       → GAS は全ファイルを1つのスコープに連結する。同じ名前の関数が
+ *         2つあると、後ろが黙って勝つ。ファイルを分けていると気づけない。
  *
  *   node tools/lint.js
  */
@@ -255,6 +261,65 @@ files.forEach((name) => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// F. Apps Script に無いもの
+// ---------------------------------------------------------------------------
+
+// 文字列とコメントは潰したあとを見るので、ヘッダ値や案内文には当たらない。
+const NOT_IN_GAS = [
+  [/\brequire\s*\(/, 'require（Node のもの）'],
+  [/\bmodule\.exports\b/, 'module.exports（Node のもの）'],
+  [/\bprocess\.(env|argv|exit)\b/, 'process（Node のもの）'],
+  [/\bBuffer\./, 'Buffer（Node のもの）'],
+  [/\bsetTimeout\s*\(|\bsetInterval\s*\(/, 'setTimeout / setInterval（Utilities.sleep を使う）'],
+  [/(^|[^.\w])window\./, 'window（ブラウザのもの）'],
+  [/(^|[^.\w])document\./, 'document（ブラウザのもの）'],
+  [/\blocalStorage\b|\bsessionStorage\b/, 'ブラウザの保存領域'],
+  [/\bnew\s+XMLHttpRequest\b/, 'XMLHttpRequest（UrlFetchApp を使う）'],
+  [/(^|[^.\w])fetch\s*\(/, '素の fetch（UrlFetchApp を使う）'],
+  [/\b__dirname\b|\b__filename\b/, 'Node のもの'],
+  [/\bstructuredClone\s*\(/, 'GAS には無い'],
+  [/\basync\s+function\b|[^\w]await\s/, 'GAS は Promise を待てない'],
+  [/\.replaceAll\s*\(/, 'String.replaceAll は新しすぎる（.replace(/x/g) を使う）'],
+  [/\bObject\.hasOwn\s*\(/, 'Object.hasOwn は新しすぎる（hasKey_ を使う）'],
+  [/\|\|=|&&=|\?\?=/, '論理代入は新しすぎる'],
+];
+
+files.forEach((name) => {
+  const bare = strip(fs.readFileSync(path.join(SRC, name), 'utf8'));
+  bare.split('\n').forEach((line, index) => {
+    if (/lint-ok:/.test(line)) return;
+    NOT_IN_GAS.forEach((rule) => {
+      if (rule[0].test(line)) {
+        report(name, index + 1, 'F Apps Script に無いもの', rule[1] + ' … ' + line);
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G. トップレベルの名前の衝突
+// ---------------------------------------------------------------------------
+
+{
+  const seen = {};
+  files.forEach((name) => {
+    const bare = strip(fs.readFileSync(path.join(SRC, name), 'utf8'));
+    bare.split('\n').forEach((line, index) => {
+      const found = /^function\s+([A-Za-z_$][\w$]*)\s*\(/.exec(line)
+                 || /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/.exec(line);
+      if (!found) return;
+      const key = found[1];
+      if (seen[key]) {
+        report(name, index + 1, 'G トップレベルの名前の衝突',
+               key + ' は ' + seen[key] + ' でも宣言されている');
+      } else {
+        seen[key] = name + ':' + (index + 1);
+      }
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 

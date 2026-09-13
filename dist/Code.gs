@@ -1790,9 +1790,35 @@ function figureOrNull_(text) {
   return FIGURE_SHAPE.test(value) ? value : null;
 }
 
+/**
+ * 表に出る文字から、目に見えない厄介者を落とす。
+ *
+ * 会社名のように**外の文字列がそのまま件名になる**経路がある。そこに
+ * 制御文字が混ざると、Google に弾かれて（400）同期ごと止まるか、
+ * 通っても読めない予定がカレンダーに残る。
+ *
+ * 落とすのは、改行・タブ以外の制御文字と、書字方向を変える指示、
+ * それに対になっていないサロゲート（文字として成立していないもの）。
+ */
+const INVISIBLE = new RegExp(
+  '[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f'      // 制御文字
+  + '\u200e\u200f\u202a-\u202e\u2066-\u2069'            // 書字方向の指示
+  + '\ufeff'                                                 // BOM
+  + ']', 'g');
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:[^\ud800-\udbff]|^)[\udc00-\udfff]/g;
+
+function sanitizeText_(text) {
+  return String(text)
+    .replace(INVISIBLE, '')
+    .replace(LONE_SURROGATE, function (match) {
+      // 対になっていない側だけを落とす（前の1文字は残す）
+      return match.length === 2 ? match.charAt(0) : '';
+    });
+}
+
 function clip_(text, limit) {
   if (text === null || text === undefined) return null;
-  const s = String(text);
+  const s = sanitizeText_(String(text));
   return s.length <= limit ? s : s.slice(0, limit - 1) + '…';
 }
 
@@ -2566,14 +2592,7 @@ function investingCountry_(body) {
 function pickText_(html, regex) {
   const match = regex.exec(html);
   if (!match) return null;
-  const text = match[1]
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const text = plainText_(match[1]);
   return text && text !== '-' ? text : null;
 }
 
@@ -2900,15 +2919,46 @@ function scheduleReleaseName_(name) {
     .trim();
 }
 
+/**
+ * 実体参照を文字に戻す。
+ *
+ * 解読が足りないと、**負の値が黙って消える**。取得先が「-0.2%」を
+ * `&minus;0.2%` や `&#8722;0.2%` と書くことがあり、そのままでは
+ * 「値の形」に見えないので落とされてしまう。落ちるぶんには害は無いが、
+ * 出せるはずの数字が出ないのは、それはそれで正しくない。
+ *
+ * 戻した文字はこのあと sanitizeText_ と値の形の検査を通るので、
+ * ここで解読を増やしても、変なものが件名に載ることはない。
+ */
+const ENTITIES = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  minus: '\u2212', ndash: '\u2013', mdash: '\u2014', hellip: '\u2026',
+  lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c', rdquo: '\u201d',
+  deg: '\u00b0', percnt: '%', yen: '\u00a5', euro: '\u20ac', pound: '\u00a3',
+};
+
+function decodeEntities_(text) {
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/gi, function (_, hex) {
+      const code = parseInt(hex, 16);
+      return isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code) : '';
+    })
+    .replace(/&#(\d+);/g, function (_, digits) {
+      const code = Number(digits);
+      return isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code) : '';
+    })
+    // & を最後に戻す。先に戻すと「&amp;lt;」が「<」になってしまう。
+    .replace(/&([a-z]+);/gi, function (whole, name) {
+      const key = String(name).toLowerCase();
+      return hasKey_(ENTITIES, key) ? ENTITIES[key] : whole;
+    });
+}
+
 /** タグと実体参照を落として、素のテキストにする。 */
 function plainText_(html) {
-  return String(html)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, function (_, code) { return String.fromCharCode(Number(code)); })
+  return decodeEntities_(String(html).replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -3761,6 +3811,7 @@ function isDigest_(event) {
  */
 
 const MAX_REMINDERS = 5;   // Google 側の上限
+const MAX_REMINDER_MINUTES = 40320;   // 同上（4週間）
 
 /** 一時的な失敗を何回まで待って試し直すか。 */
 const CALENDAR_RETRIES = 4;
@@ -3819,9 +3870,9 @@ function toCalendarResource_(event) {
     transparency: 'transparent',
     reminders: {
       useDefault: false,
-      overrides: (CONFIG.reminders[tier] || []).slice(0, MAX_REMINDERS).map(function (minutes) {
-        return { method: 'popup', minutes: minutes };
-      }),
+      // 設定の検証でも弾いているが、ここが最後の防波堤。通知1件の
+      // 書き方がおかしいだけで、その回の同期を丸ごと失敗させない。
+      overrides: reminderOverrides_(CONFIG.reminders[tier]),
     },
     extendedProperties: {
       private: {
@@ -3863,6 +3914,19 @@ function toCalendarResource_(event) {
   return resource;
 }
 
+/** Google が受け取れる通知だけに整える（0〜40320 分の整数・5件まで）。 */
+function reminderOverrides_(minutesList) {
+  const out = [];
+  (Array.isArray(minutesList) ? minutesList : []).forEach(function (minutes) {
+    if (out.length >= MAX_REMINDERS) return;
+    if (typeof minutes !== 'number' || !isFinite(minutes)) return;
+    const rounded = Math.round(minutes);
+    if (rounded < 0 || rounded > MAX_REMINDER_MINUTES) return;
+    out.push({ method: 'popup', minutes: rounded });
+  });
+  return out;
+}
+
 /**
  * 実際にカレンダーへ書き込む内容そのもののハッシュ。
  *
@@ -3893,20 +3957,33 @@ function resolveCalendarId_(create) {
   if (cached && prop_(PROP_CALENDAR_NAME) === name) return cached;
   if (cached) forgetCalendarId_();
 
+  // 同じ名前のカレンダーが複数あることがある（複製した・共有された）。
+  // 見つけた順に採ると、Google が返す並び順しだいで書き込む先が変わり、
+  // 予定が2つのカレンダーに割れる。全部見てから決める。
+  const matches = [];
   let pageToken = null;
   do {
     const page = calendarCall_(function () {
       return Calendar.CalendarList.list({ maxResults: 250, pageToken: pageToken });
     });
-    const items = page.items || [];
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].summary === name) {
-        rememberCalendarId_(items[i].id, name);
-        return items[i].id;
-      }
-    }
+    (page.items || []).forEach(function (item) {
+      if (item.summary === name && item.id) matches.push(item.id);
+    });
     pageToken = page.nextPageToken;
   } while (pageToken);
+
+  if (matches.length) {
+    // 並び順に左右されないよう、ID の順で決める。
+    matches.sort();
+    if (matches.length > 1) {
+      log_('「' + name + '」という名前のカレンダーが ' + matches.length + ' 個あります（'
+           + matches.join(', ') + '）。'
+           + matches[0] + ' を使います。'
+           + '意図した方に入れるには、00_config.js の calendar.id に ID を書いてください。');
+    }
+    rememberCalendarId_(matches[0], name);
+    return matches[0];
+  }
 
   if (create === false) {
     throw new Error('カレンダー「' + name + '」が見つかりません');
@@ -4682,17 +4759,20 @@ function configProblems_() {
                   + '（例: Asia/Tokyo）');
   }
 
-  const window = CONFIG.window;
-  if (!window || typeof window !== 'object') {
+  // ブラウザの window と紛れるので、変数名は syncRange にしておく。
+  const syncRange = CONFIG.window;
+  if (!syncRange || typeof syncRange !== 'object') {
     problems.push('window の設定がありません（daysAhead / daysBack）');
   } else {
     ['daysAhead', 'daysBack'].forEach(function (key) {
-      const value = window[key];
+      const value = syncRange[key];
       if (typeof value !== 'number' || value < 0 || value !== Math.floor(value)) {
         problems.push('window.' + key + ' は 0 以上の整数にしてください: ' + value);
       }
     });
-    if (window.daysAhead > 400) problems.push('window.daysAhead は 400 日以内にしてください');
+    if (syncRange.daysAhead > MAX_WINDOW_DAYS) {
+      problems.push('window.daysAhead は ' + MAX_WINDOW_DAYS + ' 日以内にしてください');
+    }
   }
 
   const calendar = CONFIG.calendar;
@@ -4725,8 +4805,12 @@ function configProblems_() {
       return;
     }
     list.forEach(function (minutes) {
-      if (typeof minutes !== 'number' || minutes < 0 || minutes > 40320) {
-        problems.push('reminders.' + tier + ' は 0〜40320 分の数値にしてください: ' + minutes);
+      // Google は整数の分しか受け取らない。小数を送ると 400 で弾かれ、
+      // その回の同期が丸ごと止まる。
+      if (typeof minutes !== 'number' || !isFinite(minutes)
+          || minutes < 0 || minutes > 40320 || minutes !== Math.floor(minutes)) {
+        problems.push('reminders.' + tier
+                      + ' は 0〜40320 分の整数にしてください: ' + minutes);
       }
     });
   });

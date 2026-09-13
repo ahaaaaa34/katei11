@@ -246,9 +246,35 @@ function figureOrNull_(text) {
   return FIGURE_SHAPE.test(value) ? value : null;
 }
 
+/**
+ * 表に出る文字から、目に見えない厄介者を落とす。
+ *
+ * 会社名のように**外の文字列がそのまま件名になる**経路がある。そこに
+ * 制御文字が混ざると、Google に弾かれて（400）同期ごと止まるか、
+ * 通っても読めない予定がカレンダーに残る。
+ *
+ * 落とすのは、改行・タブ以外の制御文字と、書字方向を変える指示、
+ * それに対になっていないサロゲート（文字として成立していないもの）。
+ */
+const INVISIBLE = new RegExp(
+  '[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f'      // 制御文字
+  + '\u200e\u200f\u202a-\u202e\u2066-\u2069'            // 書字方向の指示
+  + '\ufeff'                                                 // BOM
+  + ']', 'g');
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:[^\ud800-\udbff]|^)[\udc00-\udfff]/g;
+
+function sanitizeText_(text) {
+  return String(text)
+    .replace(INVISIBLE, '')
+    .replace(LONE_SURROGATE, function (match) {
+      // 対になっていない側だけを落とす（前の1文字は残す）
+      return match.length === 2 ? match.charAt(0) : '';
+    });
+}
+
 function clip_(text, limit) {
   if (text === null || text === undefined) return null;
-  const s = String(text);
+  const s = sanitizeText_(String(text));
   return s.length <= limit ? s : s.slice(0, limit - 1) + '…';
 }
 

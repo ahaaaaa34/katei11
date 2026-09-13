@@ -7,6 +7,7 @@
  */
 
 const MAX_REMINDERS = 5;   // Google 側の上限
+const MAX_REMINDER_MINUTES = 40320;   // 同上（4週間）
 
 /** 一時的な失敗を何回まで待って試し直すか。 */
 const CALENDAR_RETRIES = 4;
@@ -65,9 +66,9 @@ function toCalendarResource_(event) {
     transparency: 'transparent',
     reminders: {
       useDefault: false,
-      overrides: (CONFIG.reminders[tier] || []).slice(0, MAX_REMINDERS).map(function (minutes) {
-        return { method: 'popup', minutes: minutes };
-      }),
+      // 設定の検証でも弾いているが、ここが最後の防波堤。通知1件の
+      // 書き方がおかしいだけで、その回の同期を丸ごと失敗させない。
+      overrides: reminderOverrides_(CONFIG.reminders[tier]),
     },
     extendedProperties: {
       private: {
@@ -109,6 +110,19 @@ function toCalendarResource_(event) {
   return resource;
 }
 
+/** Google が受け取れる通知だけに整える（0〜40320 分の整数・5件まで）。 */
+function reminderOverrides_(minutesList) {
+  const out = [];
+  (Array.isArray(minutesList) ? minutesList : []).forEach(function (minutes) {
+    if (out.length >= MAX_REMINDERS) return;
+    if (typeof minutes !== 'number' || !isFinite(minutes)) return;
+    const rounded = Math.round(minutes);
+    if (rounded < 0 || rounded > MAX_REMINDER_MINUTES) return;
+    out.push({ method: 'popup', minutes: rounded });
+  });
+  return out;
+}
+
 /**
  * 実際にカレンダーへ書き込む内容そのもののハッシュ。
  *
@@ -139,20 +153,33 @@ function resolveCalendarId_(create) {
   if (cached && prop_(PROP_CALENDAR_NAME) === name) return cached;
   if (cached) forgetCalendarId_();
 
+  // 同じ名前のカレンダーが複数あることがある（複製した・共有された）。
+  // 見つけた順に採ると、Google が返す並び順しだいで書き込む先が変わり、
+  // 予定が2つのカレンダーに割れる。全部見てから決める。
+  const matches = [];
   let pageToken = null;
   do {
     const page = calendarCall_(function () {
       return Calendar.CalendarList.list({ maxResults: 250, pageToken: pageToken });
     });
-    const items = page.items || [];
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].summary === name) {
-        rememberCalendarId_(items[i].id, name);
-        return items[i].id;
-      }
-    }
+    (page.items || []).forEach(function (item) {
+      if (item.summary === name && item.id) matches.push(item.id);
+    });
     pageToken = page.nextPageToken;
   } while (pageToken);
+
+  if (matches.length) {
+    // 並び順に左右されないよう、ID の順で決める。
+    matches.sort();
+    if (matches.length > 1) {
+      log_('「' + name + '」という名前のカレンダーが ' + matches.length + ' 個あります（'
+           + matches.join(', ') + '）。'
+           + matches[0] + ' を使います。'
+           + '意図した方に入れるには、00_config.js の calendar.id に ID を書いてください。');
+    }
+    rememberCalendarId_(matches[0], name);
+    return matches[0];
+  }
 
   if (create === false) {
     throw new Error('カレンダー「' + name + '」が見つかりません');

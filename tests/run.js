@@ -5594,6 +5594,513 @@ suite('該当が 0 件のとき', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('Google Calendar API が受け取れる形になっている', () => {
+  // 形が外れていると 400 で弾かれ、その1件どころか同期が丸ごと止まる。
+  // テストの偽カレンダーは何でも受け取るので、仕様を別に書いて突き合わせる。
+  const cp = (...codes) => codes.map((c) => String.fromCodePoint(c)).join('');
+  const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  const CONTROL = new RegExp('[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]');
+
+  const check = (r, label) => {
+    ok(/^[a-v0-9]{5,1024}$/.test(r.id), label + ': id ' + r.id);
+    ok(r.summary && r.summary.length <= 1024, label + ': summary');
+    ok(typeof r.description === 'string' && r.description.length <= 8192,
+       label + ': description');
+    ok(!CONTROL.test(r.summary + r.description),
+       label + ': 制御文字 ' + JSON.stringify(r.summary.slice(0, 40)));
+    ok(['opaque', 'transparent'].indexOf(r.transparency) !== -1, label + ': transparency');
+    if (r.colorId !== undefined) {
+      ok(/^([1-9]|1[01])$/.test(r.colorId), label + ': colorId ' + r.colorId);
+    }
+    const overrides = r.reminders.overrides || [];
+    ok(overrides.length <= 5, label + ': 通知が5件を超える');
+    overrides.forEach((o) => {
+      eq(o.method, 'popup', label);
+      ok(typeof o.minutes === 'number' && o.minutes >= 0 && o.minutes <= 40320
+         && o.minutes === Math.floor(o.minutes), label + ': minutes ' + o.minutes);
+    });
+    const hasDate = r.start.date !== undefined;
+    eq(hasDate, r.end.date !== undefined, label + ': start と end で形が違う');
+    if (hasDate) {
+      ok(/^\d{4}-\d{2}-\d{2}$/.test(r.start.date), label + ': start.date');
+      eq(r.start.timeZone, undefined, label + ': 終日に timeZone を送っている');
+      eq(new Date(r.end.date) - new Date(r.start.date), 86400000, label + ': 終日は1日');
+    } else {
+      ok(RFC3339.test(r.start.dateTime), label + ': start.dateTime ' + r.start.dateTime);
+      ok(RFC3339.test(r.end.dateTime), label + ': end.dateTime');
+      ok(new Date(r.end.dateTime) > new Date(r.start.dateTime), label + ': end <= start');
+    }
+    const priv = r.extendedProperties.private;
+    let total = 0;
+    Object.keys(priv).forEach((key) => {
+      eq(typeof priv[key], 'string', label + ': ' + key + ' が文字列でない');
+      total += Buffer.byteLength(key + priv[key], 'utf8');
+      ok(Buffer.byteLength(key + priv[key], 'utf8') <= 1024, label + ': ' + key + ' が長い');
+    });
+    ok(total <= 32 * 1024, label + ': extendedProperties の合計');
+    if (r.source) ok(/^https?:\/\//.test(r.source.url), label + ': source.url');
+    ['iCalUID', 'etag', 'kind', 'htmlLink', 'created', 'updated', 'creator', 'organizer']
+      .forEach((key) => eq(r[key], undefined, label + ': ' + key + ' を送っている'));
+  };
+
+  test('どの時差・どの表示設定でも、仕様の内側に収まる', () => {
+    let seen = 0;
+    ['Asia/Tokyo', 'Pacific/Kiritimati', 'Pacific/Midway', 'UTC'].forEach((timezone) => {
+      [false, true].forEach((allDay) => {
+        const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-11T12:00:00Z',
+          UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                         fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                           getContentText: () => '' })) } });
+        Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                              fomcAutoFetch: false, officialTimes: false });
+        api.CONFIG.timezone = timezone;
+        api.CONFIG.display.allDay = allDay;
+        api.CONFIG.filter.minImpact = 0;
+        const ctx = api.syncWindow_();
+        const events = api.collectEvents_(ctx);
+        events.concat(api.weeklyDigestEvents_(events, ctx)).forEach((e) => {
+          seen++;
+          check(api.toCalendarResource_(e),
+                timezone + '/' + (allDay ? '終日' : '時刻') + '/' + e.indicatorId);
+        });
+      });
+    });
+    ok(seen > 300, '見た件数: ' + seen);
+  });
+
+  test('外から来た文字列の、目に見えない厄介者を落とす', () => {
+    // 決算の会社名のように、外の文字列がそのまま件名になる経路がある。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const start = api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York');
+    [['制御文字', 'C' + cp(7) + 'P' + cp(0) + 'I'],
+     ['エスケープ', 'A' + cp(27) + '[31mB'],
+     ['書字方向', cp(0x202e) + 'abc' + cp(0x202c)],
+     ['BOM', cp(0xfeff) + 'CPI'],
+     ['対にならないサロゲート', 'CPI' + String.fromCharCode(0xd800)],
+    ].forEach((row) => {
+      const event = api.makeEvent_({ indicatorId: 'us_cpi', title: row[1], start: start,
+        end: new Date(start.getTime() + 1800000), impact: 98, country: 'US',
+        category: 'inflation', confidence: 'official' });
+      check(api.toCalendarResource_(event), '極端: ' + row[0]);
+    });
+  });
+
+  test('ふつうの文字は落とさない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const keep = '米 消費者物価指数 (CPI)　全角も\t改行も\n' + cp(0x1f534) + cp(0x1f1fa, 0x1f1f8);
+    eq(api.sanitizeText_(keep), keep);
+  });
+
+  test('通知の書き方がおかしくても、同期を止めない', () => {
+    // 設定の検証でも弾くが、ここが最後の防波堤。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.reminders.S = [-5, 99999, 1.5, 60, 30, 20, 10, 5];
+    const start = api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York');
+    const event = api.makeEvent_({ indicatorId: 'us_cpi', title: 'CPI', start: start,
+      end: new Date(start.getTime() + 1800000), impact: 98, country: 'US',
+      category: 'inflation', confidence: 'official' });
+    const r = api.toCalendarResource_(event);
+    eq(r.reminders.overrides.map((o) => o.minutes), [2, 60, 30, 20, 10]);
+    check(r, '通知が変な設定');
+  });
+
+  test('小数の通知は、設定の検証で名指しされる', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.reminders.S = [1.5];
+    ok(api.configProblems_().some((p) => p.indexOf('reminders.S') === 0),
+       JSON.stringify(api.configProblems_()));
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('対象期間の意味', () => {
+  // 「2026年8月分」が1つずれると、見る人は前月の数字を今月のものだと
+  // 思う。日付のずれと違って目で見ても気づけないので、意味から検算する。
+  const monthly = () => G.INDICATORS.filter((i) => i.period_offset !== undefined);
+  const parse = (label) => {
+    const found = /^(\d{4})年(\d{1,2})月分$/.exec(label);
+    return found ? Number(found[1]) * 12 + Number(found[2]) - 1 : null;
+  };
+
+  test('終わっていない月の統計は出さない', () => {
+    [2024, 2025, 2026, 2027, 2028].forEach((year) => {
+      monthly().forEach((i) => {
+        G.ruleDates_(i.schedule, Y(year, 1, 1), Y(year, 12, 31)).forEach((day) => {
+          const label = G.periodLabel_(day, i.period_offset);
+          const period = parse(label);
+          ok(period !== null, i.id + ': ' + label);
+          const release = day.getUTCFullYear() * 12 + day.getUTCMonth();
+          ok(release - period >= 1,
+             i.id + ' ' + K(day) + ' が ' + label + ' を出している');
+          ok(release - period <= 3,
+             i.id + ' ' + K(day) + ' の対象が古すぎる: ' + label);
+        });
+      });
+    });
+  });
+
+  test('1年ぶん並べると、各月がちょうど1回ずつ現れる', () => {
+    [2025, 2026, 2027].forEach((year) => {
+      monthly().forEach((i) => {
+        const days = G.ruleDates_(i.schedule, Y(year, 1, 1), Y(year, 12, 31));
+        if (days.length !== 12) return;   // 年12回の規則だけを見る
+        const seen = days.map((d) => parse(G.periodLabel_(d, i.period_offset)));
+        eq(seen.length, new Set(seen).size, i.id + ' ' + year + ': 同じ月が2回');
+        const sorted = seen.slice().sort((a, b) => a - b);
+        for (let k = 1; k < sorted.length; k++) {
+          eq(sorted[k] - sorted[k - 1], 1,
+             i.id + ' ' + year + ': 対象月が飛んでいる ' + JSON.stringify(sorted));
+        }
+      });
+    });
+  });
+
+  test('年をまたぐところでずれない', () => {
+    monthly().forEach((i) => {
+      G.ruleDates_(i.schedule, Y(2027, 1, 1), Y(2027, 1, 31)).forEach((day) => {
+        const want = { '-1': '2026年12月分', '-2': '2026年11月分' }[String(i.period_offset)];
+        if (!want) return;
+        eq(G.periodLabel_(day, i.period_offset), want, i.id + ' ' + K(day));
+      });
+    });
+  });
+
+  test('四半期の指標に、月のラベルを付けない', () => {
+    // 「2026年8月分」と書いた GDP は、それだけで嘘になる。
+    ['us_gdp', 'us_eci', 'us_productivity'].forEach((id) => {
+      eq(G.indicator_(id).period_offset, undefined, id + ' に月の period_offset がある');
+    });
+  });
+
+  test('カレンダーに出る対象期間も、同じ条件を満たす', () => {
+    const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-11T12:00:00Z',
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 300;
+    api.CONFIG.filter.minImpact = 0;
+    const ctx = api.syncWindow_();
+    let seen = 0;
+    api.collectEvents_(ctx).forEach((event) => {
+      if (!event.period) return;
+      ok(api.renderDescription_(event).indexOf(event.period) !== -1,
+         event.indicatorId + ': 対象期間が説明に出ていない');
+      const period = parse(event.period);
+      // FOMC 議事要旨は「◯月◯日会合分」。月次の書式だけを見る。
+      if (period === null) {
+        ok(/会合分$/.test(event.period), '知らない書式: ' + event.period);
+        return;
+      }
+      seen++;
+      const local = api.localDate_(event.start, api.CONFIG.timezone);
+      const gap = (local.getUTCFullYear() * 12 + local.getUTCMonth()) - period;
+      ok(gap >= 1 && gap <= 3,
+         event.indicatorId + ' ' + K(local) + ' → ' + event.period);
+    });
+    ok(seen > 100, '見た件数: ' + seen);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('利用者がカレンダーを触ったとき', () => {
+  const OFFLINE = {
+    fetch: () => { throw new Error('down'); },
+    fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503, getContentText: () => '' })),
+  };
+  const mk = (calendar, store, patch) => {
+    const api = loadGas({ Calendar: calendar, properties: store,
+                          now: '2026-09-11T12:00:00Z', UrlFetchApp: OFFLINE });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    if (patch) patch(api.CONFIG);
+    return api;
+  };
+  const writes = (plan) => plan.created.length + plan.updated.length + plan.deleted.length;
+
+  test('予定を手で動かして件名も書き換えても、次の同期で戻る', () => {
+    const calendar = fakeCalendar();
+    const store = {};
+    mk(calendar, store).syncCalendar();
+    const target = [...calendar.events.values()].find((e) => e.start.dateTime);
+    const original = JSON.parse(JSON.stringify(target));
+    const moved = new Date(new Date(target.start.dateTime).getTime() + 3 * 86400000);
+    target.start = { dateTime: moved.toISOString(), timeZone: 'Asia/Tokyo' };
+    target.end = { dateTime: new Date(moved.getTime() + 1800000).toISOString(),
+                   timeZone: 'Asia/Tokyo' };
+    target.summary = '手で書き換えた件名';
+
+    mk(calendar, store).syncCalendar();
+    const back = calendar.events.get(original.id);
+    ok(back, '消えてしまった');
+    eq(back.summary, original.summary, '件名が直らない');
+    eq(back.start.dateTime, original.start.dateTime, '日時が直らない');
+    eq(writes(mk(calendar, store).syncCalendar()), 0, '直したあと落ち着かない');
+  });
+
+  test('表示タイムゾーンを変えても、同じ発表が2つにならない', () => {
+    const calendar = fakeCalendar();
+    const store = {};
+    mk(calendar, store, (c) => { c.timezone = 'Asia/Tokyo'; }).syncCalendar();
+    const before = calendar.events.size;
+    mk(calendar, store, (c) => { c.timezone = 'America/New_York'; }).syncCalendar();
+    const uids = [...calendar.events.values()]
+      .map((e) => (e.extendedProperties.private || {}).uid);
+    eq(uids.length, new Set(uids).size, '同じ発表が2つ入った');
+    ok(calendar.events.size <= before + 3, before + ' -> ' + calendar.events.size);
+    eq(writes(mk(calendar, store,
+                 (c) => { c.timezone = 'America/New_York'; }).syncCalendar()), 0);
+  });
+
+  test('スクリプトのプロパティを消しても、作り直さない', () => {
+    // プロジェクトを移した・プロパティを手で消した、のあと。
+    const calendar = fakeCalendar();
+    const store = {};
+    mk(calendar, store).syncCalendar();
+    const before = calendar.events.size;
+    Object.keys(store).forEach((key) => { delete store[key]; });
+    const plan = mk(calendar, store).syncCalendar();
+    eq(calendar.events.size, before, '覚えを失うと重複する');
+    eq(writes(plan), 0, '全部書き直している: ' + writes(plan));
+  });
+
+  test('uninstall のあとに同期しても、何も壊さない', () => {
+    const calendar = fakeCalendar();
+    const store = {};
+    mk(calendar, store).syncCalendar();
+    const before = calendar.events.size;
+    try { mk(calendar, store).uninstall(); } catch (err) { /* 自動実行が無いだけ */ }
+    const plan = mk(calendar, store).syncCalendar();
+    eq(calendar.events.size, before);
+    eq(writes(plan), 0);
+  });
+
+  test('同じ名前のカレンダーが複数あっても、書き込む先が揺れない', () => {
+    // 揺れると、予定が2つのカレンダーに割れる。
+    const N = '経済指標 (Nasdaq)';
+    const calendar = fakeCalendar({ calendarList: [{ id: 'b2', summary: N },
+                                                   { id: 'a1', summary: N }] });
+    const store = {};
+    const logs = [];
+    const api = loadGas({ Calendar: calendar, properties: store, log: (l) => logs.push(String(l)),
+                          now: '2026-09-11T12:00:00Z', UrlFetchApp: OFFLINE });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    eq(api.resolveCalendarId_(true), 'a1', 'ID の順で決めること');
+    ok(logs.join('\n').indexOf('2 個あります') !== -1,
+       '複数あることを知らせること:\n' + logs.join('\n'));
+
+    // 並び順が変わっても、覚えを消しても、同じ先
+    calendar.calendars.reverse();
+    delete store._calendarId;
+    delete store._calendarName;
+    eq(mk(calendar, store).resolveCalendarId_(true), 'a1');
+  });
+
+  test('このツールが作っていない予定には、触らない', () => {
+    const calendar = fakeCalendar();
+    const store = {};
+    mk(calendar, store).syncCalendar();
+    calendar.events.set('mine1', {
+      id: 'mine1', summary: '自分で入れた予定',
+      start: { dateTime: '2026-09-15T01:00:00.000Z', timeZone: 'Asia/Tokyo' },
+      end: { dateTime: '2026-09-15T02:00:00.000Z', timeZone: 'Asia/Tokyo' },
+      extendedProperties: { private: {} },
+    });
+    mk(calendar, store).syncCalendar();
+    ok(calendar.events.has('mine1'), '同期で人の予定を消した');
+    mk(calendar, store).removeAllEvents();
+    ok(calendar.events.has('mine1'), '全消しで人の予定まで消した');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('情報源のページが作り替えられたら', () => {
+  // でたらめな入力は「落ちないか」を見る。ここで見たいのは
+  // **もっともらしい改修で、黙って間違ったデータを出さないか**。
+  // 落ちるのはまだいい（気づける）。いちばん悪いのは、それらしい数字が
+  // 入って誰も気づかないこと。
+  const investing = (rows) => {
+    const api = loadGas({ Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ data: rows }) }) } });
+    api.CONFIG.providers.investing = true;
+    return api;
+  };
+  const ctx = (api) => ({ start: api.ymd_(2026, 9, 1), end: api.ymd_(2026, 10, 31),
+                          timezone: 'Asia/Tokyo' });
+  const row = (attrs, cur, name, actual) =>
+    '<tr ' + attrs + '><td class="left flagCur noWrap">' + cur + '</td>'
+    + '<td class="left event">' + name + '</td>'
+    + '<td id="eventActual_1">' + actual + '</td></tr>';
+
+  test('見た目が変わっただけなら、ちゃんと読める', () => {
+    [['class が増えた',
+      '<tr class="js-event-item new" data-event-datetime="2026/09/11 12:30:00">'
+      + '<td class="left flagCur noWrap sticky">USD</td>'
+      + '<td class="left event highlight">Core CPI (MoM)</td>'
+      + '<td id="eventActual_1" class="bold">0.2%</td></tr>'],
+     ['列の順番が入れ替わった',
+      '<tr data-event-datetime="2026/09/11 12:30:00">'
+      + '<td class="left event">Core CPI (MoM)</td>'
+      + '<td class="left flagCur noWrap">USD</td>'
+      + '<td id="eventActual_1">0.2%</td></tr>'],
+     ['入れ子になった',
+      row('data-event-datetime="2026/09/11 12:30:00"',
+          '<span><i class="flag"></i>USD</span>',
+          '<span class="name">Core CPI (MoM)</span>', '<span>0.2%</span>')],
+    ].forEach((variant) => {
+      const api = investing(variant[1]);
+      const events = api.providerInvesting_(ctx(api));
+      eq(events.length, 1, variant[0]);
+      eq(events[0].indicatorId, 'us_cpi', variant[0]);
+      eq(events[0].actual, '0.2%', variant[0]);
+      eq(K(api.localDate_(events[0].start, 'Asia/Tokyo')), '2026-09-11', variant[0]);
+    });
+  });
+
+  test('日付の書式が変わったら、勝手に別の日にしない', () => {
+    // 月日が逆（11/09）を素直に読むと、9月11日が11月9日になる。
+    // 読めないなら読めないままにする方が、はるかにまし。
+    [['月日が逆', '11/09/2026 12:30:00'],
+     ['ISO になった', '2026-09-11T12:30:00Z'],
+     ['空', ''],
+     ['文字列', 'next Friday'],
+    ].forEach((variant) => {
+      const api = investing(row('data-event-datetime="' + variant[1] + '"',
+                                'USD', 'Core CPI (MoM)', '0.2%'));
+      const events = api.providerInvesting_(ctx(api));
+      events.forEach((e) => {
+        const day = K(api.localDate_(e.start, 'Asia/Tokyo'));
+        ok(day === '2026-09-11' || day === '2026-09-12',
+           variant[0] + ': 本来と違う日に置いた ' + day);
+      });
+    });
+  });
+
+  test('別の国の行を、米国の指標にしない', () => {
+    const api = investing(row('data-event-datetime="2026/09/11 12:30:00"',
+                              'EUR', 'Core CPI (MoM)', '0.9%'));
+    const events = api.providerInvesting_(ctx(api));
+    events.forEach((e) => {
+      ok(e.indicatorId.indexOf('us_') !== 0,
+         'ユーロ圏の行を米国の指標として取り込んだ: ' + e.indicatorId);
+    });
+  });
+
+  test('値の欄が値でなくなったら、値なしにする', () => {
+    [['単位が言葉になった', '0.2 percent'],
+     ['注記が入った', 'Revised from 0.1%'],
+     ['印だけ', '--'],
+    ].forEach((variant) => {
+      const api = investing(row('data-event-datetime="2026/09/11 12:30:00"',
+                                'USD', 'Core CPI (MoM)', variant[1]));
+      const events = api.providerInvesting_(ctx(api));
+      events.forEach((e) => eq(e.actual, null, variant[0] + ': ' + e.actual));
+    });
+  });
+
+  test('実体参照で書かれた負の値も、ちゃんと読む', () => {
+    // 解読が足りないと、マイナスの数字だけが黙って消える。
+    [['&minus;0.2%', '\u22120.2%'],
+     ['&#8722;0.3%', '\u22120.3%'],
+     ['&#x2212;0.4%', '\u22120.4%'],
+     ['0.5&percnt;', '0.5%'],
+    ].forEach((variant) => {
+      const api = investing(row('data-event-datetime="2026/09/11 12:30:00"',
+                                'USD', 'Core CPI&nbsp;(MoM)', variant[0]));
+      const events = api.providerInvesting_(ctx(api));
+      eq(events.length, 1, variant[0]);
+      eq(events[0].actual, variant[1], variant[0]);
+    });
+  });
+
+  test('実体参照の解読で、変なものを作らない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.plainText_('&amp;lt;'), '&lt;', '二重に戻してはいけない');
+    eq(api.plainText_('&unknown;'), '&unknown;', '知らないものはそのまま');
+    eq(api.plainText_('&#0;x'), 'x', '不正な符号位置は落とす');
+    eq(api.plainText_('&#99999999999;y'), 'y', '範囲外は落とす');
+    eq(api.plainText_('&#x41;&#x42;'), 'AB', '16進の数値参照');
+  });
+
+  test('ページが別物に差し替わったら、何も取り込まない', () => {
+    ['<div class="login">Please sign in to view the economic calendar</div>',
+     '<tr data-event-datetime=""><td class="left event"></td></tr>',
+     '', '{}', '<html><body>Service Unavailable</body></html>',
+    ].forEach((html) => {
+      const api = investing(html);
+      eq(api.providerInvesting_(ctx(api)).length, 0, JSON.stringify(html.slice(0, 40)));
+    });
+  });
+
+  test('発表予定表: 読めない作りになったら、暫定値に落ちる', () => {
+    // 中途半端に読んで、間違った時刻を「一次情報」と称するのが最悪。
+    [['表がリストになった',
+      '<ul><li>September 11, 2026 - Consumer Price Index - 08:30 AM</li></ul>'],
+     ['1行しか無い',
+      '<table><tr><td>September 11, 2026</td><td>Consumer Price Index</td>'
+      + '<td>08:30 AM</td></tr></table>'],
+     ['年が去年のまま',
+      '<table><tr><td>September 11, 2025</td><td>Consumer Price Index</td>'
+      + '<td>08:30 AM</td></tr>'
+      + '<tr><td>September 14, 2025</td><td>Producer Price Index</td><td>08:30 AM</td></tr>'
+      + '<tr><td>September 16, 2025</td><td>Employment Situation</td>'
+      + '<td>08:30 AM</td></tr></table>'],
+     ['真夜中のような時刻',
+      '<table><tr><td>September 11, 2026</td><td>Consumer Price Index</td>'
+      + '<td>12:30 AM</td></tr>'
+      + '<tr><td>September 14, 2026</td><td>Producer Price Index</td><td>12:30 AM</td></tr>'
+      + '<tr><td>September 16, 2026</td><td>Employment Situation</td>'
+      + '<td>12:30 AM</td></tr></table>'],
+    ].forEach((variant) => {
+      const api = loadGas({ Calendar: fakeCalendar(),
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                       getContentText: () => variant[1] }) } });
+      const events = api.providerOfficial_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                             timezone: 'Asia/Tokyo' });
+      eq(events.length, 0, variant[0] + ': ' + events.length + ' 件を採ってしまった');
+    });
+  });
+
+  test('発表予定表: 書式が変わっても読めるものは読む', () => {
+    [['数字だけの日付と12時間制',
+      '<table><tr><td>09/11/2026</td><td>Consumer Price Index for August 2026</td>'
+      + '<td>8:30 AM</td></tr>'
+      + '<tr><td>09/14/2026</td><td>Producer Price Index</td><td>8:30 AM</td></tr>'
+      + '<tr><td>09/16/2026</td><td>Employment Situation</td><td>8:30 AM</td></tr></table>'],
+     ['24時間制',
+      '<table><tr><td>September 11, 2026</td><td>Consumer Price Index</td>'
+      + '<td>08:30</td></tr>'
+      + '<tr><td>September 14, 2026</td><td>Producer Price Index</td><td>08:30</td></tr>'
+      + '<tr><td>September 16, 2026</td><td>Employment Situation</td>'
+      + '<td>08:30</td></tr></table>'],
+     ['a.m. ET 表記',
+      '<table><tr><td>September 11, 2026</td><td>Consumer Price Index</td>'
+      + '<td>8:30 a.m. ET</td></tr>'
+      + '<tr><td>September 14, 2026</td><td>Producer Price Index</td>'
+      + '<td>8:30 a.m. ET</td></tr>'
+      + '<tr><td>September 16, 2026</td><td>Employment Situation</td>'
+      + '<td>8:30 a.m. ET</td></tr></table>'],
+    ].forEach((variant) => {
+      const api = loadGas({ Calendar: fakeCalendar(),
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                       getContentText: () => variant[1] }) } });
+      const events = api.providerOfficial_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                             timezone: 'Asia/Tokyo' });
+      ok(events.length > 0, variant[0] + ': 読めなかった');
+      events.forEach((e) => {
+        const et = api.formatClock_(e.start, 'America/New_York');
+        eq(et.time, '08:30', variant[0] + ': ' + et.date + ' ' + et.time);
+        eq(et.date.slice(0, 4), '2026', variant[0] + ': ' + et.date);
+        eq(e.timeSource, 'official', variant[0]);
+      });
+    });
+  });
+});
+
 // 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
 require('./props').registerPropertyTests({
   suite, test, eq, ok, loadGas, fakeCalendar,

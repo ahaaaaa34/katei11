@@ -46,17 +46,20 @@ function configProblems_() {
                   + '（例: Asia/Tokyo）');
   }
 
-  const window = CONFIG.window;
-  if (!window || typeof window !== 'object') {
+  // ブラウザの window と紛れるので、変数名は syncRange にしておく。
+  const syncRange = CONFIG.window;
+  if (!syncRange || typeof syncRange !== 'object') {
     problems.push('window の設定がありません（daysAhead / daysBack）');
   } else {
     ['daysAhead', 'daysBack'].forEach(function (key) {
-      const value = window[key];
+      const value = syncRange[key];
       if (typeof value !== 'number' || value < 0 || value !== Math.floor(value)) {
         problems.push('window.' + key + ' は 0 以上の整数にしてください: ' + value);
       }
     });
-    if (window.daysAhead > 400) problems.push('window.daysAhead は 400 日以内にしてください');
+    if (syncRange.daysAhead > MAX_WINDOW_DAYS) {
+      problems.push('window.daysAhead は ' + MAX_WINDOW_DAYS + ' 日以内にしてください');
+    }
   }
 
   const calendar = CONFIG.calendar;
@@ -89,8 +92,12 @@ function configProblems_() {
       return;
     }
     list.forEach(function (minutes) {
-      if (typeof minutes !== 'number' || minutes < 0 || minutes > 40320) {
-        problems.push('reminders.' + tier + ' は 0〜40320 分の数値にしてください: ' + minutes);
+      // Google は整数の分しか受け取らない。小数を送ると 400 で弾かれ、
+      // その回の同期が丸ごと止まる。
+      if (typeof minutes !== 'number' || !isFinite(minutes)
+          || minutes < 0 || minutes > 40320 || minutes !== Math.floor(minutes)) {
+        problems.push('reminders.' + tier
+                      + ' は 0〜40320 分の整数にしてください: ' + minutes);
       }
     });
   });

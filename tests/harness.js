@@ -53,7 +53,11 @@ function makeStubs(overrides = {}) {
   // 無い環境」を再現できない。キーの有無で判断する。
   const pick = (name, fallback) => (name in overrides ? overrides[name] : fallback);
 
-  const store = Object.assign({}, overrides.properties);
+  // 渡されたものをそのまま使う（コピーしない）。コピーしていたせいで、
+  // **実行をまたいで残る状態**（週次まとめの重複防止、覚えたカレンダー
+  // ID など）を、複数回まわすテストで一度も試せていなかった。
+  // 1回きりのテストは今までどおり毎回リテラルを渡せばよい。
+  const store = overrides.properties || {};
   const sentMail = [];
   const fetched = [];
   const slept = [];

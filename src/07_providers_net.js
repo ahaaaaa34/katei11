@@ -388,14 +388,7 @@ function investingCountry_(body) {
 function pickText_(html, regex) {
   const match = regex.exec(html);
   if (!match) return null;
-  const text = match[1]
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const text = plainText_(match[1]);
   return text && text !== '-' ? text : null;
 }
 
@@ -722,15 +715,46 @@ function scheduleReleaseName_(name) {
     .trim();
 }
 
+/**
+ * 実体参照を文字に戻す。
+ *
+ * 解読が足りないと、**負の値が黙って消える**。取得先が「-0.2%」を
+ * `&minus;0.2%` や `&#8722;0.2%` と書くことがあり、そのままでは
+ * 「値の形」に見えないので落とされてしまう。落ちるぶんには害は無いが、
+ * 出せるはずの数字が出ないのは、それはそれで正しくない。
+ *
+ * 戻した文字はこのあと sanitizeText_ と値の形の検査を通るので、
+ * ここで解読を増やしても、変なものが件名に載ることはない。
+ */
+const ENTITIES = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  minus: '\u2212', ndash: '\u2013', mdash: '\u2014', hellip: '\u2026',
+  lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c', rdquo: '\u201d',
+  deg: '\u00b0', percnt: '%', yen: '\u00a5', euro: '\u20ac', pound: '\u00a3',
+};
+
+function decodeEntities_(text) {
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/gi, function (_, hex) {
+      const code = parseInt(hex, 16);
+      return isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code) : '';
+    })
+    .replace(/&#(\d+);/g, function (_, digits) {
+      const code = Number(digits);
+      return isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code) : '';
+    })
+    // & を最後に戻す。先に戻すと「&amp;lt;」が「<」になってしまう。
+    .replace(/&([a-z]+);/gi, function (whole, name) {
+      const key = String(name).toLowerCase();
+      return hasKey_(ENTITIES, key) ? ENTITIES[key] : whole;
+    });
+}
+
 /** タグと実体参照を落として、素のテキストにする。 */
 function plainText_(html) {
-  return String(html)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, function (_, code) { return String.fromCharCode(Number(code)); })
+  return decodeEntities_(String(html).replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
