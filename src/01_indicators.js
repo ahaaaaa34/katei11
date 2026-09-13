@@ -55,6 +55,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
     why: "声明文よりも会見のトーンで相場が反転することが多い。会見中の値動きが その日のナスダックの引け値を決めるケースが頻繁にある。",
     match: ["fomc press conference"]
   },
@@ -69,6 +70,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
     why: "会合3週間後に公表。委員のタカ/ハト分布が判明し利下げ織り込みが動く。",
     match: ["fomc meeting minutes"]
   },
@@ -83,6 +85,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.federalreserve.gov/monetarypolicy/beige-book-default.htm",
     why: "FOMC 2週間前公表。景況感の定性評価で会合前のポジション調整材料になる。",
     match: ["beige book"]
   },
@@ -97,6 +100,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.federalreserve.gov/newsevents/speeches.htm",
     why: "特に議長・副議長・NY連銀総裁の発言は会合間の織り込みを動かす。 ブラックアウト期間外は突発的に相場を動かす最大要因のひとつ。",
     match: ["fed .*(speaks|speech)", "powell speaks", "fomc member .* speaks"]
   },
@@ -134,6 +138,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "^Personal Income and Outlays$",
+    url: "https://www.bea.gov/data/income-saving/personal-income",
     why: "FRB が政策判断で最重視するインフレ指標。コア PCE 前年比が 2% 目標へ どれだけ近づいたかで利下げ観測が動く。CPI/PPI から概ね推定できるため サプライズは小さめだが、乖離した時の反応は大きい。",
     match: ["core pce price index", "pce price index", "personal spending"]
   },
@@ -152,6 +157,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Producer Price Index",
+    url: "https://www.bls.gov/ppi/",
     why: "CPI の翌日前後に出る川上インフレ。PCE 算出に使われる項目を含むため、 CPI 後のコア PCE 予想を書き換えて二次的に相場を動かす。",
     match: ["^ppi", "core ppi", "producer price index"]
   },
@@ -189,6 +195,7 @@ const INDICATORS = [
       exact: true
     },
     fred_release: "Unemployment Insurance Weekly Claims",
+    url: "https://oui.doleta.gov/unemploy/claims.asp",
     why: "唯一の週次高頻度雇用データ。労働市場の転換点をいち早く映すため、景気後退 懸念が高まる局面では月次指標より材料視される。",
     match: ["initial jobless claims", "continuing jobless claims"]
   },
@@ -207,6 +214,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Job Openings and Labor Turnover",
+    url: "https://www.bls.gov/jlt/",
     why: "求人/失業者比率は FRB が需給逼迫の判断に使う。労働需要の減速確認に有効。",
     match: ["jolts job openings"]
   },
@@ -225,6 +233,7 @@ const INDICATORS = [
       n: 1,
       exact: false
     },
+    url: "https://adpemploymentreport.com/",
     why: "NFP の2日前に出る民間版。NFP との相関は高くないが、直後の NFP 予想を修正させるため短期のポジション調整を誘発する。",
     match: ["adp nonfarm employment"]
   },
@@ -244,6 +253,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Employment Cost Index",
+    url: "https://www.bls.gov/eci/",
     why: "四半期ベースで最も精度の高い賃金指標。賃金インフレの粘着性判定に使われる。",
     match: ["employment cost index"]
   },
@@ -261,6 +271,7 @@ const INDICATORS = [
       n: 3,
       exact: true
     },
+    url: "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/",
     why: "米国 GDP の約7割を占めるサービス業の体温計。支払価格指数がインフレの 先行指標として同時に注目される。50 割れは景気後退シグナル。",
     match: ["ism non-manufacturing", "ism services pmi"]
   },
@@ -278,6 +289,7 @@ const INDICATORS = [
       n: 1,
       exact: true
     },
+    url: "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/",
     why: "月初一番手の景況感指標で、その月の相場基調を作りやすい。半導体など ハイテク製造業の受注サイクルとも連動する。",
     match: ["ism manufacturing pmi"]
   },
@@ -294,6 +306,7 @@ const INDICATORS = [
       day: 23,
       exact: false
     },
+    url: "https://www.pmi.spglobal.com/",
     why: "当月分を月内に速報する唯一の景況感指標。ISM より2週間早く方向感が出る。",
     match: ["s&p global us .*pmi", "markit us .*pmi"]
   },
@@ -311,6 +324,7 @@ const INDICATORS = [
       n: -1,
       exact: true
     },
+    url: "https://www.conference-board.org/topics/consumer-confidence",
     why: "雇用の「十分/不十分」判断が失業率の先行指標として機能する。個人消費の先読み材料。",
     match: ["cb consumer confidence"]
   },
@@ -328,6 +342,7 @@ const INDICATORS = [
       n: 2,
       exact: false
     },
+    url: "https://www.sca.isr.umich.edu/",
     why: "本体よりも同時発表の「期待インフレ率(1年先/5-10年先)」が重要。 2022年6月のように、この数字だけで FRB の利上げ幅が変わった前例がある。",
     match: ["michigan consumer sentiment", "michigan .*expectations"]
   },
@@ -345,6 +360,7 @@ const INDICATORS = [
       n: -1,
       exact: false
     },
+    url: "https://www.sca.isr.umich.edu/",
     why: "速報からの改定幅、特に期待インフレ率の修正が確認される。",
     match: ["michigan consumer sentiment"]
   },
@@ -362,6 +378,7 @@ const INDICATORS = [
       n: 3,
       exact: false
     },
+    url: "https://www.philadelphiafed.org/surveys-and-data/regional-economic-analysis/manufacturing-business-outlook-survey",
     why: "ISM 製造業の先行指標として月中に方向感を与える地区連銀サーベイ。",
     match: ["philadelphia fed manufacturing"]
   },
@@ -378,6 +395,7 @@ const INDICATORS = [
       day: 15,
       exact: false
     },
+    url: "https://www.newyorkfed.org/survey/empire/empiresurvey_overview",
     why: "月内で最初に出る地区連銀サーベイ。振れは大きいが方向感の初動を示す。",
     match: ["ny empire state manufacturing"]
   },
@@ -412,6 +430,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Advance Monthly Sales for Retail",
+    url: "https://www.census.gov/retail/",
     why: "GDP の7割を占める個人消費の実測値。アマゾンなど EC 関連の業績観にも 直結し、「消費は堅調 → 利下げ後退」という金利経路でも効く。",
     match: ["^retail sales", "core retail sales"]
   },
@@ -429,6 +448,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "^Gross Domestic Product$",
+    url: "https://www.bea.gov/data/gdp/gross-domestic-product",
     why: "同時発表のコア PCE 価格指数(四半期)がしばしば本体より材料視される。 速報値のインパクトが最大で、改定・確報の反応は限定的。",
     match: ["^gdp \\(", "gdp price index"]
   },
@@ -447,6 +467,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Advance Report on Durable Goods",
+    url: "https://www.census.gov/manufacturing/m3/",
     why: "コア資本財受注が企業設備投資の先行指標。半導体・産業機械の需要観に効く。",
     match: ["durable goods orders", "core durable goods"]
   },
@@ -465,6 +486,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Industrial Production and Capacity Utilization",
+    url: "https://www.federalreserve.gov/releases/g17/current/default.htm",
     why: "製造業の実体活動。設備稼働率は供給側インフレ圧力の目安になる。",
     match: ["industrial production"]
   },
@@ -483,6 +505,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "U.S. International Trade in Goods and Services",
+    url: "https://www.bea.gov/data/intl-trade-investment/international-trade-goods-and-services",
     why: "GDP 寄与度の修正材料。関税政策が焦点の局面では注目度が上がる。",
     match: ["trade balance"]
   },
@@ -501,6 +524,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "New Residential Construction",
+    url: "https://www.census.gov/construction/nrc/",
     why: "住宅は金利感応度が最も高いセクター。利上げ/利下げの実体経済への波及を測る。",
     match: ["housing starts", "building permits"]
   },
@@ -519,6 +543,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Existing Home Sales",
+    url: "https://www.nar.realtor/research-and-statistics/housing-statistics/existing-home-sales",
     why: "住宅市場全体の約9割を占める。住宅ローン金利の実需への影響を確認する。",
     match: ["existing home sales"]
   },
@@ -537,6 +562,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "New Residential Sales",
+    url: "https://www.census.gov/construction/nrs/",
     why: "契約ベースのため中古住宅より足の速い住宅指標。",
     match: ["new home sales"]
   },
@@ -554,6 +580,7 @@ const INDICATORS = [
       n: 1,
       exact: false
     },
+    url: "https://www.census.gov/construction/c30/",
     why: "データセンター投資を含む非住宅建設が AI 設備投資サイクルの参考になる。",
     match: ["construction spending"]
   },
@@ -572,6 +599,7 @@ const INDICATORS = [
       exact: false
     },
     fred_release: "Productivity and Costs",
+    url: "https://www.bls.gov/productivity/",
     why: "単位労働コストは賃金インフレが企業に転嫁されるかの指標。AI による 生産性向上が本物かを検証する数字としても注目され始めている。",
     match: ["unit labor costs", "nonfarm productivity"]
   },
@@ -589,6 +617,7 @@ const INDICATORS = [
       n: 2,
       exact: false
     },
+    url: "https://www.treasurydirect.gov/auctions/upcoming/",
     why: "2023年秋のように、入札の不調(テール拡大)が長期金利を跳ね上げて ナスダックを直接叩く場面がある。需給イベントとして無視できない。",
     match: ["10-year note auction"]
   },
@@ -606,6 +635,7 @@ const INDICATORS = [
       n: 2,
       exact: false
     },
+    url: "https://www.treasurydirect.gov/auctions/upcoming/",
     why: "最も需給が緩みやすい年限。長期金利の期間プレミアム拡大の起点になりやすい。",
     match: ["30-year bond auction"]
   },
@@ -622,6 +652,7 @@ const INDICATORS = [
       type: "none"
     },
     tz: "Asia/Tokyo",
+    url: "https://www.boj.or.jp/mopo/mpmsche_minu/index.htm",
     why: "円キャリー取引の巻き戻しを通じてナスダックに波及する。2024年8月の 急落のように、日銀のサプライズは米ハイテク株の需給を直撃しうる。",
     match: ["boj interest rate decision", "boj policy rate"]
   },
@@ -639,6 +670,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
     why: "世界的な金融環境の方向感を左右する。FRB との政策金利差はドル需給に効く。",
     match: ["ecb .*rate decision", "deposit facility rate"]
   },
@@ -654,6 +686,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.stats.gov.cn/sj/zxfb/",
     why: "半導体・ハードウェアの最終需要と、アップルなどのサプライチェーン観に影響。",
     match: ["chinese manufacturing pmi", "caixin manufacturing pmi"]
   },
@@ -667,6 +700,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.nyse.com/markets/hours-calendars",
     why: "休場日は前後の流動性が落ち、ギャップが出やすい。日本時間の取引計画に必要。"
   },
   {
@@ -680,6 +714,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.nyse.com/markets/hours-calendars",
     why: "出来高が細り値動きが荒くなる。指値の置き方を変えるべき日。"
   },
   {
@@ -693,6 +728,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.nasdaq.com/market-activity/quadruple-witching",
     why: "先物・オプションの同時清算で出来高が通常の2-3倍に膨らむ。指数の 需給が歪み、前後数日でトレンドが転換することがある。"
   },
   {
@@ -706,6 +742,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.cboe.com/about/hours/us-options/",
     why: "ガンマの剥落で満期週明けにボラティリティが上がりやすい。"
   },
   {
@@ -719,6 +756,7 @@ const INDICATORS = [
     schedule: {
       type: "none"
     },
+    url: "https://www.spglobal.com/spdji/en/governance/methodology-information/",
     why: "パッシブ資金の売買が引けに集中する。銘柄入替の思惑も出来高を押し上げる。"
   },
 ];

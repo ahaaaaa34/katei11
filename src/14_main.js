@@ -11,6 +11,7 @@
  *   verifyRules()       発表規則の当たり具合を、FRED の実績で測る
  *   checkOfficialTimes() 発表予定表（時刻の一次情報）が読めているか確かめる
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
+ *   checkSourceUrls()   解説に出す発表元リンクが生きているか確かめる
  *   runTests()          日付計算などの自己テスト
  */
 
@@ -63,6 +64,16 @@ function configProblems_() {
     problems.push('calendar の設定がありません（name か id）');
   } else if (!calendar.id && !calendar.name) {
     problems.push('calendar.name か calendar.id のどちらかは必要です');
+  }
+
+  // 情報源がひとつも有効でないと、予定は一件も作れない。放っておくと
+  // 「該当なし」と区別がつかず、既に入っている予定まで整理されてしまう。
+  const providers = CONFIG.providers;
+  if (!providers || typeof providers !== 'object') {
+    problems.push('providers の設定がありません');
+  } else if (!Object.keys(providers).some(function (name) { return providers[name]; })) {
+    problems.push('providers がすべて false です。'
+                  + '少なくとも rules は有効にしてください（通信不要で動きます）');
   }
 
   const impact = CONFIG.filter && CONFIG.filter.minImpact;
@@ -315,8 +326,16 @@ function setup() {
 
 /** 自動実行の本体。 */
 function syncCalendar() {
-  validateConfig_();
-  requireCalendarService_();
+  // 設定の誤りも「知らせるべき失敗」。ここが try の外にあると、
+  // 放置運用で一番起きやすい壊れ方だけが黙って落ち続ける。
+  try {
+    validateConfig_();
+    requireCalendarService_();
+  } catch (error) {
+    log_('設定に問題があるため同期できません: ' + error);
+    notifyFailure_(error);
+    throw error;
+  }
 
   // 手動実行と自動実行がぶつかっても、同じ書き込みを二重に投げないようにする。
   // 取れなければ既に別の実行が同じ仕事をしているので、この回は何もしない。
@@ -329,8 +348,20 @@ function syncCalendar() {
   const ctx = syncWindow_();
   try {
     const collected = collectEvents_(ctx);
+    // 0 件には2つの意味がある。「この期間にその条件の発表が無い」のと、
+    // 「取りに行けなかった」の2つ。前者は正常（窓を1日にする、しきい値を
+    // 90 にする、といった設定なら普通に起きる）で、失敗として毎回
+    // 通知するのは間違い。後者だけを失敗として扱う。
     if (!collected.length) {
-      throw new Error('同期対象が 0 件でした。条件か情報源の状態を確認してください。');
+      const silent = downSources_();
+      if (silent.length) {
+        throw new Error('同期対象が 0 件で、つながらなかった情報源があります（'
+                        + silent.join(', ') + '）。'
+                        + '取りこぼしの可能性があるため、この回は何もしません。');
+      }
+      log_('この期間に、条件に合う発表はありませんでした（'
+           + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
+           + ' / 影響度 ' + CONFIG.filter.minImpact + ' 以上）。');
     }
     // 週次ダイジェストの通知に使うため、実際に入る姿を外へ持ち出す。
     let shownEvents = collected;
@@ -350,6 +381,8 @@ function syncCalendar() {
     const down = downSources_();
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
          + ' / ' + planSummary_(plan)
+         + (plan.truncated ? ' / 時間の上限が近いため途中までです'
+                             + '（残りは次の実行で書きます）' : '')
          + (down.length ? ' / 今回つながらなかった情報源: ' + down.join(', ')
                           + '（その予定はそのまま残しました）' : ''));
 
@@ -643,6 +676,68 @@ function checkFomcAutoFetch() {
   const text = lines.join('\n');
   log_(text);
   return text;
+}
+
+/**
+ * 解説に出している「発表元のリンク」が、本当に生きていて、
+ * 本当にその指標のページかを確かめる。
+ *
+ * カレンダーに出る 🔗 は「数字を自分で確かめたい人が行く場所」なので、
+ * ここが違う機関や消えたページを指していると、確かめようがなくなる。
+ * リンクは書いた時点の思い込みで古びるが、それは**実際に叩かないと
+ * 分からない**。だから機械で叩いて、題名まで並べて人に見せる。
+ *
+ * 見方:
+ *   ✅ 200 で、題名がその指標のものなら良い
+ *   ❌ 404 や別機関の題名が出たら、01_indicators.js の url を直す
+ */
+function checkSourceUrls() {
+  const lines = ['発表元リンクの確認', ''];
+  const seen = {};
+  let bad = 0;
+  let missing = 0;
+
+  INDICATORS.forEach(function (indicator) {
+    if (!indicator.url) {
+      missing++;
+      lines.push('－ ' + indicator.id + '  出典 URL が未設定  (' + indicator.name + ')');
+      return;
+    }
+    // 同じ URL を共有している指標は、1回だけ叩く。
+    if (seen[indicator.url]) {
+      lines.push('  ' + seen[indicator.url] + '  ' + indicator.id
+                 + '（上と同じリンク）');
+      return;
+    }
+    const html = fetchText_(indicator.url);
+    if (html === null) {
+      bad++;
+      seen[indicator.url] = '❌';
+      lines.push('❌ ' + indicator.id + '  取得できません  ' + indicator.url);
+      return;
+    }
+    seen[indicator.url] = '✅';
+    lines.push('✅ ' + indicator.id + '  ' + pageTitle_(html));
+    lines.push('     ' + indicator.url);
+  });
+
+  lines.push('');
+  lines.push('題名が指標と食い違っていたら、そのリンクは間違いです。');
+  lines.push('01_indicators.js の url を、発表元の該当ページに直してください。');
+  if (missing) {
+    lines.push('出典 URL が未設定: ' + missing + ' 件（リンクが出ません）');
+  }
+  if (bad) lines.push('取得できないリンク: ' + bad + ' 件');
+  const text = lines.join('\n');
+  log_(text);
+  return text;
+}
+
+/** HTML の <title> を取り出す（確認用の表示にだけ使う）。 */
+function pageTitle_(html) {
+  const found = /<title[^>]*>([\s\S]{0,300}?)<\/title>/i.exec(String(html));
+  if (!found) return '（題名なし）';
+  return plainText_(found[1]).replace(/\s+/g, ' ').trim().slice(0, 90) || '（題名なし）';
 }
 
 /**

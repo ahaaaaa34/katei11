@@ -925,11 +925,15 @@ suite('入口と自動実行', () => {
     eq(calendar.events.size, plan.created.length);
   });
 
-  test('0 件なら失敗として扱い、メールで知らせる', () => {
+  test('情報源を全部切ったら、止めてメールで知らせる', () => {
+    // 全部 false は設定の誤り。ここで止めないと「該当なし」と区別が
+    // つかず、既に入っている予定まで整理してしまう。
     const api = loadGas({ Calendar: fakeCalendar() });
     api.CONFIG.providers = { rules: false, fomc: false, market: false,
                              fred: false, earnings: false, investing: false };
-    throws(() => api.syncCalendar(), '0 件');
+    ok(api.configProblems_().some((p) => p.indexOf('providers') === 0),
+       JSON.stringify(api.configProblems_()));
+    throws(() => api.syncCalendar(), /providers/);
     eq(api._mail.length, 1);
   });
 
@@ -1935,6 +1939,9 @@ suite('回帰: 日をまたぐ予定が理由なく消される', () => {
 
 // ---------------------------------------------------------------------------
 suite('90日連続運用', () => {
+  // 変異テストはテスト一式を何十回も回すので、そこでは短く回す。
+  const DAYS = Number(process.env.LONG_RUN_DAYS || 90);
+
   test('毎日同期し続けても、溜まらない・暴れない・消えない', () => {
     const calendar = fakeCalendar();
     const api = loadGas({
@@ -1951,7 +1958,7 @@ suite('90日連続運用', () => {
     let firstDay = 0;
     let laterWrites = 0;
 
-    for (let day = 0; day < 90; day++) {
+    for (let day = 0; day < DAYS; day++) {
       const today = G.addDays_(Y(2026, 9, 1), day);
       const ctx = { start: G.addDays_(today, -5), end: G.addDays_(today, 60),
                     timezone: 'Asia/Tokyo' };
@@ -1972,7 +1979,8 @@ suite('90日連続運用', () => {
     eq(Object.values(createdTimes).filter((n) => n > 1), [],
        '同じ予定が二度作られてはいけない（作り直しの兆候）');
     eq(deletions, 0, '窓から外れただけの過去の予定を消してはいけない');
-    ok(laterWrites / 89 < 3, '2日目以降の書き込みは1日数件まで: ' + (laterWrites / 89));
+    ok(laterWrites / (DAYS - 1) < 3,
+       '2日目以降の書き込みは1日数件まで: ' + (laterWrites / (DAYS - 1)));
 
     const byUid = {};
     [...calendar.events.values()].forEach((item) => {
@@ -3005,10 +3013,23 @@ suite('取得先から、値でないものを受け取らない', () => {
     });
   });
 
-  test('ふつうのリンクは、そのまま使える', () => {
+  test('リンク先は、集計サイトより発表元を優先する', () => {
+    // 数字を確かめたい人が行きたいのは、集計サイトの個別ページではなく
+    // 発表元。カタログに発表元があるなら、必ずそちらを出す。
     const api = investing(row('0.2%', '/economic-calendar/cpi-733'));
     const e = api.providerInvesting_(ctx)[0];
+    eq(e.url, api.indicator_('us_cpi').url);
+    ok(e.url.indexOf('bls.gov') !== -1, e.url);
+  });
+
+  test('発表元が分からない指標だけ、集計サイトのリンクを使う', () => {
+    const api = investing(row('0.2%', '/economic-calendar/cpi-733'));
+    const cpi = api.indicator_('us_cpi');
+    const keep = cpi.url;
+    delete cpi.url;
+    const e = api.providerInvesting_(ctx)[0];
     eq(e.url, 'https://www.investing.com/economic-calendar/cpi-733');
+    cpi.url = keep;
   });
 
   test('件名は、こちらのカタログの名前しか使わない', () => {
@@ -5166,6 +5187,410 @@ suite('カタログどうしの辻褄', () => {
       ok(of(pair[0]) > of(pair[1]),
          pair[0] + '(' + of(pair[0]) + ') は ' + pair[1] + '(' + of(pair[1]) + ') より重いはず');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('発表元リンク（数字を自分で確かめるための出口）', () => {
+  const page = (title) => ({ getResponseCode: () => 200,
+    getContentText: () => '<html><head><title>' + title + '</title></head>' });
+
+  test('すべての指標が、発表元のリンクを持っている', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const missing = api.INDICATORS.filter((i) => !i.url).map((i) => i.id);
+    // シカゴ PMI だけは発表元のページを確かめられていないので空にしてある。
+    // 増やすときは checkSourceUrls() で確かめてから。
+    eq(missing, ['us_chicago_pmi']);
+  });
+
+  test('カレンダーに入るどの予定にも、発表元のリンクが付く', () => {
+    // 休場・SQ・リバランスは規則から作るので、カタログの url を
+    // 渡し忘れやすい。1年ぶん展開して、抜けが無いことを見る。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 300;
+    const events = api.collectEvents_(api.syncWindow_(Y(2026, 9, 11)));
+    ok(events.length > 200, '件数: ' + events.length);
+    const missing = {};
+    events.forEach((e) => { if (!e.url) missing[e.indicatorId] = true; });
+    eq(Object.keys(missing), []);
+  });
+
+  test('リンクはすべて https で、集計サイトではない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.INDICATORS.forEach((i) => {
+      if (!i.url) return;
+      ok(i.url.indexOf('https://') === 0, i.id + ': ' + i.url);
+      ok(!/investing\.com|tradingeconomics|forexfactory/.test(i.url),
+         i.id + ': 集計サイトを出典にしている ' + i.url);
+    });
+  });
+
+  test('生きているリンクは題名つきで、死んでいるリンクは名指しされる', () => {
+    let asked = 0;
+    const api = loadGas({ Calendar: fakeCalendar(), UrlFetchApp: { fetch: (url) => {
+      asked++;
+      if (url.indexOf('/ppi/') !== -1) return { getResponseCode: () => 404,
+                                                getContentText: () => '' };
+      return page('Producer Price Indexes : U.S. Bureau of Labor Statistics');
+    } } });
+    const text = api.checkSourceUrls();
+    ok(text.indexOf('❌ us_ppi') !== -1, '死んだリンクが名指しされること');
+    ok(text.indexOf('取得できないリンク: 1 件') !== -1, text.slice(-200));
+    ok(text.indexOf('出典 URL が未設定: 1 件') !== -1, text.slice(-200));
+    ok(text.indexOf('Producer Price Indexes') !== -1, '題名が出ること');
+    // 同じ URL を共有する指標は、1回しか叩かない
+    const unique = {};
+    api.INDICATORS.forEach((i) => { if (i.url) unique[i.url] = true; });
+    eq(asked, Object.keys(unique).length, '同じリンクを何度も叩かないこと');
+  });
+
+  test('通信が全部落ちても、確認そのものは落ちない', () => {
+    const api = loadGas({ Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); } } });
+    const text = api.checkSourceUrls();
+    ok(text.indexOf('取得できないリンク') !== -1, text.slice(-200));
+  });
+
+  test('題名が取れないページでも、落ちずに印だけ付ける', () => {
+    const api = loadGas({ Calendar: fakeCalendar(), UrlFetchApp: { fetch: () => ({
+      getResponseCode: () => 200, getContentText: () => '<html><body>x</body></html>' }) } });
+    const text = api.checkSourceUrls();
+    ok(text.indexOf('（題名なし）') !== -1, text.slice(0, 200));
+    ok(text.indexOf('取得できないリンク') === -1, '取れているのに失敗扱いしないこと');
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('日を進めながら動かし続ける', () => {
+  // 既定は短めに。長く回したいときは LONG_RUN_DAYS=365 npm test。
+  const LONG_RUN_DAYS = Number(process.env.LONG_RUN_DAYS || 30);
+  const offline = (calendar, store, now) => {
+    const api = loadGas({
+      Calendar: calendar, properties: store, now: now,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) },
+    });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    return api;
+  };
+
+  test('「いま」を差し替えられる（これが無いと日の経過を試せない）', () => {
+    const a = loadGas({ Calendar: fakeCalendar(), now: '2026-03-15T12:00:00Z' });
+    eq(K(a.syncWindow_().start), '2026-03-10');
+    const b = loadGas({ Calendar: fakeCalendar(), now: new Date(Date.UTC(2026, 7, 1, 12)) });
+    eq(K(b.syncWindow_().start), '2026-07-27');
+    // 引数つきの Date と Date.UTC は素のままであること
+    eq(new (a._stubs.Date)(Date.UTC(2020, 0, 2)).toISOString(), '2020-01-02T00:00:00.000Z');
+    eq(a._stubs.Date.UTC(2020, 0, 2), Date.UTC(2020, 0, 2));
+  });
+
+  test('日を進めても、書き換えは毎日ごく僅かで、重複しない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const start = Date.UTC(2026, 0, 1);
+    let writes = 0;
+    let worstDay = 0;
+    for (let d = 0; d < LONG_RUN_DAYS; d++) {
+      const today = new Date(start + d * 86400000);
+      const plan = offline(calendar, store, today).syncCalendar();
+      const n = plan.created.length + plan.updated.length + plan.deleted.length;
+      writes += n;
+      if (d > 0) worstDay = Math.max(worstDay, n);
+    }
+    ok(worstDay <= 12, '1日の書き換えが多すぎる: ' + worstDay);
+    ok(writes < calendar.events.size * 1.5,
+       '書き込みが多すぎる: ' + writes + ' 回 / ' + calendar.events.size + ' 件');
+    const uids = [...calendar.events.values()]
+      .map((e) => (e.extendedProperties.private || {}).uid);
+    eq(uids.length, new Set(uids).size, '同じ発表が2つ入っている');
+  });
+
+  test('窓より前に出た予定は、二度と書き換わらない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const start = Date.UTC(2026, 0, 1);
+    let touched = 0;
+    for (let d = 0; d < LONG_RUN_DAYS; d++) {
+      const today = new Date(start + d * 86400000);
+      const api = offline(calendar, store, today);
+      const ctx = api.syncWindow_();
+      const before = {};
+      calendar.events.forEach((e, id) => {
+        const at = new Date(e.start.dateTime || e.start.date).getTime();
+        if (at < ctx.start.getTime()) before[id] = JSON.stringify([e.summary, e.start, e.end]);
+      });
+      api.syncCalendar();
+      Object.keys(before).forEach((id) => {
+        const e = calendar.events.get(id);
+        ok(e, '窓より前の予定が消えた: ' + id);
+        if (JSON.stringify([e.summary, e.start, e.end]) !== before[id]) touched++;
+      });
+    }
+    eq(touched, 0, '過去の予定が書き換わった回数');
+  });
+
+  test('窓にいる間に入った数値は、窓を出ても残る', () => {
+    // 発表済みの結果は、あとから見返すためのもの。窓の外に出た途端に
+    // 消えたら、記録として使えない。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const row = (day) => '<tr data-event-datetime="' + day + ' 12:30:00">'
+      + '<td class="left flagCur noWrap">USD</td>'
+      + '<td class="left event">Core CPI (MoM)</td>'
+      + '<td id="eventActual_1">0.2%</td></tr>';
+    const withFigure = (now, html) => {
+      const api = loadGas({ Calendar: calendar, properties: store, now: now,
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ data: html }) }) } });
+      Object.assign(api.CONFIG.providers, { fred: false, earnings: false,
+                                            fomcAutoFetch: false, officialTimes: false });
+      api.CONFIG.providers.investing = true;
+      return api;
+    };
+
+    // 1日目: 2026-01-14 の結果つきで書き込む
+    withFigure(new Date(Date.UTC(2026, 0, 15, 12)), row('2026/01/14')).syncCalendar();
+    const cpi = [...calendar.events.values()].find(
+      (e) => (e.extendedProperties.private || {}).indicator === 'us_cpi'
+             && (e.extendedProperties.private || {}).a);
+    ok(cpi, '結果つきの予定が作られること');
+    eq(cpi.extendedProperties.private.a, '0.2%');
+
+    // 日を進める。情報源はもうその行を返さない（過去すぎるため）。
+    for (let d = 1; d <= LONG_RUN_DAYS; d++) {
+      withFigure(new Date(Date.UTC(2026, 0, 15, 12) + d * 86400000), '').syncCalendar();
+    }
+    const later = calendar.events.get(cpi.id);
+    ok(later, '過去の予定が消えた');
+    eq(later.extendedProperties.private.a, '0.2%', '入っていた結果が消えた');
+    ok(later.summary.indexOf('0.2%') !== -1, later.summary);
+  });
+
+  test('記録でも、人が対象外にしたものは整理される', () => {
+    // 「消さない」を強くしすぎると、しきい値を上げても消えなくなる。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const row = '<tr data-event-datetime="2026/01/14 12:30:00">'
+      + '<td class="left flagCur noWrap">USD</td>'
+      + '<td class="left event">Core CPI (MoM)</td>'
+      + '<td id="eventActual_1">0.2%</td></tr>';
+    const mk = (now, html, patch) => {
+      const api = loadGas({ Calendar: calendar, properties: store, now: now,
+        UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ data: html }) }) } });
+      Object.assign(api.CONFIG.providers, { fred: false, earnings: false,
+                                            fomcAutoFetch: false, officialTimes: false });
+      api.CONFIG.providers.investing = true;
+      if (patch) patch(api.CONFIG);
+      return api;
+    };
+    mk(new Date(Date.UTC(2026, 0, 15, 12)), row).syncCalendar();
+    const cpi = [...calendar.events.values()].find(
+      (e) => (e.extendedProperties.private || {}).a);
+    ok(cpi, '結果つきの予定が作られること');
+
+    mk(new Date(Date.UTC(2026, 0, 17, 12)), '',
+       (config) => { config.filter.exclude = ['us_cpi']; }).syncCalendar();
+    ok(!calendar.events.get(cpi.id), '人が外したものは、記録でも整理すること');
+  });
+
+  test('まだ先の予定は、情報源から消えたら整理する', () => {
+    // 「発表が中止になった」を残し続けると、嘘の予定が居座る。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const future = new Date(Date.now() + 10 * 86400000);
+    const item = {
+      id: 'ecx', start: { dateTime: future.toISOString() },
+      extendedProperties: { private: { ecal: '1', indicator: 'us_cpi', impact: '98',
+                                       source: 'investing', a: '0.2%' } },
+    };
+    ok(!api.isFinishedRecord_(item), 'まだ先なら守らない');
+    item.start.dateTime = new Date(Date.now() - 10 * 86400000).toISOString();
+    ok(api.isFinishedRecord_(item), '済んでいて結果があるなら守る');
+    delete item.extendedProperties.private.a;
+    ok(!api.isFinishedRecord_(item), '結果が無いなら、ただの予定として整理する');
+  });
+
+  test('日付が読めない予定を、記録として守ってしまわない', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    ['', 'いつか', undefined].forEach((value) => {
+      const item = { id: 'ecx', start: value === undefined ? {} : { dateTime: value },
+        extendedProperties: { private: { ecal: '1', indicator: 'us_cpi', a: '0.2%' } } };
+      ok(!api.isFinishedRecord_(item), JSON.stringify(value));
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('6分の実行上限に、自分から手前で止まる', () => {
+  // 無料枠の Apps Script は1回の実行を6分で打ち切る。窓を最大まで
+  // 広げると書き込みが 500 件を超え、そこに届きうる。壊れはしないが、
+  // 打ち切られると毎回「失敗」の通知が届く。
+  const clockThatJumps = (afterCalls) => {
+    let calls = 0;
+    return class Jumpy extends Date {
+      constructor(...args) {
+        if (args.length === 0) super(Jumpy.now());
+        else super(...args);
+      }
+      static now() {
+        return Date.UTC(2026, 8, 11, 12) + (calls++ > afterCalls ? 10 * 60 * 1000 : 0);
+      }
+    };
+  };
+  const offline = (calendar, store, Clock) => {
+    // Date のキーは「有り／無し」で意味が変わる（undefined を渡すと
+    // 「Date が無い環境」になる）。素の時計で動かしたいときは渡さない。
+    const options = { Calendar: calendar, properties: store,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } };
+    if (Clock) options.Date = Clock;
+    const api = loadGas(options);
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    return api;
+  };
+
+  test('時間が尽きたら、書ける所までで切り上げる', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const plan = offline(calendar, store, clockThatJumps(25)).syncCalendar();
+    ok(plan.truncated, '打ち切りとして記録されること');
+    ok(plan.created.length > 0, '少しは書けていること');
+    ok(plan.created.length < 60, '全部書けてしまっては試験にならない: ' + plan.created.length);
+  });
+
+  test('書けなかったぶんを「やった」と報告しない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const plan = offline(calendar, store, clockThatJumps(25)).syncCalendar();
+    eq(plan.created.length, calendar.events.size,
+       '報告した件数と、実際に入った件数が合わないといけない');
+  });
+
+  test('次の実行で続きを書き、いつかは全部そろう', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    let rounds = 0;
+    let plan;
+    do {
+      plan = offline(calendar, store, clockThatJumps(25)).syncCalendar();
+      rounds++;
+    } while (plan.truncated && rounds < 10);
+    ok(!plan.truncated, rounds + ' 回やっても終わらない');
+    // 全部そろったあとは、何も書かない
+    const settled = offline(calendar, store, clockThatJumps(25)).syncCalendar();
+    eq(settled.created.length + settled.updated.length + settled.deleted.length, 0);
+    ok(!settled.truncated, 'やることが無い回まで打ち切り扱いしない');
+  });
+
+  test('打ち切りでも、同期そのものは失敗にしない', () => {
+    // 失敗にすると、毎回エラーの通知が届く。壊れてはいないので、
+    // 途中までであることだけを伝えて、正常に終える。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const logs = [];
+    const api = loadGas({ Calendar: calendar, properties: store,
+      Date: clockThatJumps(25), log: (line) => logs.push(String(line)),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    const plan = api.syncCalendar();
+    ok(plan, '例外にしないこと');
+    const text = logs.join('\n');
+    ok(text.indexOf('時間の上限') !== -1, '途中までだと伝えること:\n' + text.slice(-400));
+    ok(text.indexOf('同期に失敗') === -1, '失敗として扱っていないこと');
+  });
+
+  test('時間が足りているときは、何も変えない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const plan = offline(calendar, store, undefined).syncCalendar();
+    ok(!plan.truncated);
+    eq(plan.created.length, calendar.events.size);
+  });
+});
+
+// ---------------------------------------------------------------------------
+suite('該当が 0 件のとき', () => {
+  // 窓を1日に狭める・しきい値を 90 にする、といった設定なら 0 件は普通に
+  // 起きる。それを毎回「失敗」にすると、正しく設定した人にエラー通知が
+  // 届き続ける。一方、取りに行けなかったせいの 0 件は失敗のままにしたい。
+  const narrow = (providers) => {
+    const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-11T12:00:00Z',
+      properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, Object.assign(
+      { fred: false, earnings: false, investing: false,
+        fomcAutoFetch: false, officialTimes: false }, providers));
+    api.CONFIG.filter.minImpact = 90;
+    api.CONFIG.window.daysAhead = 1;
+    api.CONFIG.window.daysBack = 0;
+    return api;
+  };
+
+  test('情報源が全部健在なら、0 件は正常に終わる', () => {
+    const api = narrow({});
+    eq(api.collectEvents_(api.syncWindow_()).length, 0, '前提: この設定では 0 件');
+    const plan = api.syncCalendar();
+    ok(plan, '例外にしないこと');
+    eq(plan.created.length + plan.updated.length + plan.deleted.length, 0);
+  });
+
+  test('0 件の理由を、ログに残す', () => {
+    const logs = [];
+    const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-11T12:00:00Z',
+      properties: { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' },
+      log: (line) => logs.push(String(line)),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.filter.minImpact = 90;
+    api.CONFIG.window.daysAhead = 1;
+    api.CONFIG.window.daysBack = 0;
+    api.syncCalendar();
+    const text = logs.join('\n');
+    ok(text.indexOf('条件に合う発表はありませんでした') !== -1, text.slice(-300));
+  });
+
+  test('つながらない情報源があるなら、0 件は失敗のまま', () => {
+    // ここで通してしまうと、通信が不調な日にカレンダーを空にしかねない。
+    throws(() => narrow({ investing: true }).syncCalendar(), /つながらなかった情報源/);
+  });
+
+  test('0 件でも、対象外になった予定はちゃんと整理する', () => {
+    // しきい値を上げて 0 件になったとき、前に書いたものが残り続けたら
+    // 設定が効いていないのと同じ。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const build = (impact) => {
+      const api = loadGas({ Calendar: calendar, properties: store,
+        now: '2026-09-11T12:00:00Z',
+        UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                       fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                         getContentText: () => '' })) } });
+      Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                            fomcAutoFetch: false, officialTimes: false });
+      api.CONFIG.filter.minImpact = impact;
+      api.CONFIG.window.daysAhead = 1;
+      api.CONFIG.window.daysBack = 0;
+      return api;
+    };
+    build(0).syncCalendar();
+    ok(calendar.events.size > 0, '前提: しきい値 0 なら何か入る');
+    const plan = build(100).syncCalendar();
+    ok(plan.deleted.length > 0, 'しきい値を上げたら整理されること');
+    eq(calendar.events.size, 0);
   });
 });
 

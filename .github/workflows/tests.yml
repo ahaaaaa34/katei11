@@ -59,16 +59,23 @@ jobs:
   # 対応するテストが落ちなければ失敗させる。
   mutation:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
+    # 変異ひとつごとにテスト一式（400件超）を回すので、1台では
+    # 1時間を超える。飛ばし飛ばしに分けて、並べて回す。
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: 変異テスト
-        # 変異ひとつごとにテスト一式を回すので、性質テストの件数は
-        # 絞る。変異の検出に必要なのは「性質が破れること」であって件数では
-        # ないため。件数を増やした探索は node ジョブの方でやっている。
+      - name: 変異テスト (${{ matrix.shard }})
+        # 性質テストと通し試験の件数は絞る。変異の検出に必要なのは
+        # 「性質が破れること」であって件数ではないため。件数を増やした
+        # 探索は node ジョブの方でやっている。
         env:
           MUTATE_FUZZ_N: "8"
-        run: python3 tools/mutate.py
+          MUTATE_LONG_RUN_DAYS: "5"
+        run: python3 tools/mutate.py --shard ${{ matrix.shard }}

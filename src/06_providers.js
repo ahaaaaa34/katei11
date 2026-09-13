@@ -160,6 +160,7 @@ function pushClosures_(events, year, ctx) {
         confidence: 'rule',
         allDay: true,
         note: table[key] + ' のため NYSE・ナスダックは終日休場。\n' + holiday.why,
+        url: holiday.url,
       }));
     });
   }
@@ -180,6 +181,7 @@ function pushClosures_(events, year, ctx) {
         source: 'market',
         confidence: 'rule',
         note: table[key] + ' のため 13:00 ET で取引終了。\n' + early.why,
+        url: early.url,
       }));
     });
   }
@@ -223,6 +225,7 @@ function pushExpiries_(events, year) {
       source: 'market',
       confidence: 'rule',
       note: note,
+      url: indicator.url,
     }));
   }
 }
@@ -246,5 +249,6 @@ function pushRebalance_(events, year) {
     confidence: 'rule',
     note: '引け後に構成銘柄の入替が発表される。翌週の第3金曜の引けで' +
           'パッシブ資金が執行され、対象銘柄は前後で大きく動く。\n' + indicator.why,
+    url: indicator.url,
   }));
 }

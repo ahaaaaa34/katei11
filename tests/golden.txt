@@ -185,6 +185,7 @@
   レイバーデー のため NYSE・ナスダックは終日休場。
   休場日は前後の流動性が落ち、ギャップが出やすい。日本時間の取引計画に必要。
   
+  🔗 https://www.nyse.com/markets/hours-calendars
   自動同期: econ-calendar
 
 --- digest_weekly の説明文 ---

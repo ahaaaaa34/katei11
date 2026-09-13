@@ -361,12 +361,14 @@ function eventFromResource_(item) {
   const allDay = !!(item.start && item.start.date);
   const day = allDay ? parseDateKey_(item.start.date) : null;
   if (allDay && !day) return null;   // 日付として読めないものは触らない
+  // start も end も、欠けていることがある（古い版・手で作られた予定・
+  // 途中で切れた応答）。1件の形が崩れているだけで同期全体を止めない。
   const start = allDay
     ? zonedTime_(day, '00:00', CONFIG.timezone)
-    : new Date(item.start.dateTime);
+    : new Date((item.start && item.start.dateTime) || NaN);
   if (!validDate_(start)) return null;
   const end = allDay ? new Date(start.getTime() + 86400000)
-                     : new Date(new Date(item.end.dateTime).getTime());
+                     : new Date((item.end && item.end.dateTime) || NaN);
 
   return makeEvent_({
     indicatorId: props.indicator || 'unknown',
@@ -435,6 +437,7 @@ function buildPlan_(calendarId, events, existing, ctx) {
     if (seen[item.id]) return;
     if (ctx && !inPruneRange_(item, ctx)) return;
     if (keepThroughOutage_(item)) return;
+    if (isFinishedRecord_(item)) return;
     plan.deleted.push(item);
   });
   return plan;
@@ -458,6 +461,39 @@ function keepThroughOutage_(item) {
   const restored = eventFromResource_(item);
   if (!restored) return true;   // 読み戻せないものは、判断がつくまで触らない
   return applyFilter_([restored]).length > 0;
+}
+
+/**
+ * 発表が済んで、結果の数値まで入っている予定は、情報源から消えても残す。
+ *
+ * 集計サイトの日程表は**直近ぶんしか載せない**。数日経つと、その行は
+ * 黙って落ちる。情報源自体は生きているので「落ちている扱い」にもならず、
+ * こちらからは「もう無い」と区別がつかない。
+ *
+ * その結果、同期範囲（既定では過去5日ぶん）に残っている**発表済みの
+ * 予定が、結果の数値ごと消える**。これは予定ではなく記録なので、
+ * 消してはいけない。
+ *
+ * 人が明示的に外したもの（しきい値を上げた・exclude に入れた）は、
+ * 記録であっても整理する。そこは利用者の意思だから。
+ */
+function isFinishedRecord_(item) {
+  const props = (item.extendedProperties && item.extendedProperties.private) || {};
+  if (!props.a) return false;              // 結果が無いなら、ただの予定
+  const at = resourceStartMs_(item);
+  if (at === null || at >= Date.now()) return false;   // まだ先のことは対象外
+  const restored = eventFromResource_(item);
+  if (!restored) return true;
+  return applyFilter_([restored]).length > 0;
+}
+
+/** 予定の開始時刻をミリ秒で返す（読めなければ null）。 */
+function resourceStartMs_(item) {
+  const start = (item && item.start) || {};
+  const text = start.dateTime || start.date;
+  if (!text) return null;
+  const at = new Date(text).getTime();
+  return isFinite(at) ? at : null;
 }
 
 function inPruneRange_(item, ctx) {
@@ -516,8 +552,28 @@ function planChanges_(plan) {
 // 反映
 // ---------------------------------------------------------------------------
 
+/**
+ * Apps Script が1回の実行を打ち切るまでの時間。無料枠は6分。
+ *
+ * ここに達すると、書き込みの途中で問答無用に止められる。壊れはしない
+ * （次の回で追いつく）が、利用者には毎回**失敗の通知が届く**。
+ * それより手前で自分から切り上げて、続きは次の回に回す。
+ */
+const RUN_BUDGET_MS = 4.5 * 60 * 1000;
+
 function applyPlan_(plan) {
-  plan.created.forEach(function (row) {
+  const deadline = Date.now() + RUN_BUDGET_MS;
+  const done = { created: [], updated: [], deleted: [] };
+  let ranOut = false;
+
+  function budgetLeft() {
+    if (Date.now() < deadline) return true;
+    ranOut = true;
+    return false;
+  }
+
+  plan.created.some(function (row) {
+    if (!budgetLeft()) return true;
     try {
       calendarCall_(function () {
         return Calendar.Events.insert(row.resource, plan.calendarId);
@@ -530,23 +586,43 @@ function applyPlan_(plan) {
         return Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
       });
     }
+    done.created.push(row);
+    return false;
   });
 
-  plan.updated.forEach(function (row) {
+  plan.updated.some(function (row) {
+    if (!budgetLeft()) return true;
     calendarCall_(function () {
       return Calendar.Events.update(row.resource, plan.calendarId, row.resource.id);
     });
+    done.updated.push(row);
+    return false;
   });
 
-  plan.deleted.forEach(function (item) {
+  plan.deleted.some(function (item) {
+    if (!budgetLeft()) return true;
     try {
       calendarCall_(function () { return Calendar.Events.remove(plan.calendarId, item.id); });
     } catch (err) {
       if (!isMissingError_(err)) throw err;   // 既に無いなら成功と同じ
     }
+    done.deleted.push(item);
+    return false;
   });
 
-  log_('同期完了: ' + planSummary_(plan));
+  // 実際に書けたぶんだけを結果として返す。書けなかったぶんを「やった」と
+  // 報告すると、知らせも次回の判断も嘘になる。
+  plan.created = done.created;
+  plan.updated = done.updated;
+  plan.deleted = done.deleted;
+  plan.truncated = ranOut;
+
+  if (ranOut) {
+    log_('時間の上限が近いため、ここまでにしました（' + planSummary_(plan) + '）。'
+         + '残りは次の実行で書きます。');
+  } else {
+    log_('同期完了: ' + planSummary_(plan));
+  }
   return plan;
 }
 

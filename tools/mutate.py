@@ -42,7 +42,8 @@ MUTATIONS = [
     ("真夜中の時の正規化をやめる", "src/04_schedule.js",
      "  out.hour = out.hour % 24;\n", ""),
     ("設定の検証をやめる", "src/14_main.js",
-     "function syncCalendar() {\n  validateConfig_();", "function syncCalendar() {"),
+     "    validateConfig_();\n    requireCalendarService_();",
+     "    requireCalendarService_();"),
     ("同期範囲の上限をやめる", "src/09_collect.js",
      "  if (value > MAX_WINDOW_DAYS) {", "  if (false) {"),
     ("多重実行の排他をやめる", "src/14_main.js",
@@ -203,12 +204,45 @@ MUTATIONS = [
     ("落ちた情報源を控えない", "src/09_collect.js",
      "  SOURCE_DOWN_[name] = why || '取得できませんでした';", ""),
     ("設定で外れた予定も情報源の生死で残す", "src/11_sync.js",
-     "  return applyFilter_([restored]).length > 0;", "  return true;"),
+     "  if (!restored) return true;   // 読み戻せないものは、判断がつくまで触らない\n"
+     "  return applyFilter_([restored]).length > 0;",
+     "  if (!restored) return true;\n"
+     "  return true;"),
+    ("設定で外れた記録も、済んだからと残す", "src/11_sync.js",
+     "  if (!restored) return true;\n"
+     "  return applyFilter_([restored]).length > 0;\n}\n\n"
+     "/** 予定の開始時刻をミリ秒で返す（読めなければ null）。 */",
+     "  if (!restored) return true;\n"
+     "  return true;\n}\n\n"
+     "/** 予定の開始時刻をミリ秒で返す（読めなければ null）。 */"),
+    ("済んだ記録を、情報源から消えたら消す", "src/11_sync.js",
+     "    if (isFinishedRecord_(item)) return;", ""),
+    ("まだ先の予定まで記録として守る", "src/11_sync.js",
+     "  if (at === null || at >= Date.now()) return false;   // まだ先のことは対象外",
+     "  if (at === null) return false;"),
     ("FRED の対応付けの重なりを見ない", "src/14_main.js",
      "  problems.push.apply(problems, fredReleaseOverlaps_());", ""),
     ("拡張サービスの確認をやめる", "src/14_main.js",
-     "function syncCalendar() {\n  validateConfig_();\n  requireCalendarService_();",
-     "function syncCalendar() {\n  validateConfig_();"),
+     "    validateConfig_();\n    requireCalendarService_();\n  } catch (error) {",
+     "    validateConfig_();\n  } catch (error) {"),
+    ("設定の誤りを黙って落ちる", "src/14_main.js",
+     "    log_('設定に問題があるため同期できません: ' + error);\n"
+     "    notifyFailure_(error);\n", ""),
+    ("情報源が全部 false でも通す", "src/14_main.js",
+     "  } else if (!Object.keys(providers).some(function (name) { return providers[name]; })) {",
+     "  } else if (false) {"),
+    ("落ちた情報源があっても 0 件を正常扱いにする", "src/14_main.js",
+     "      const silent = downSources_();\n      if (silent.length) {",
+     "      const silent = downSources_();\n      if (false) {"),
+    ("該当 0 件をいつでも失敗にする", "src/14_main.js",
+     "      const silent = downSources_();\n      if (silent.length) {",
+     "      const silent = downSources_();\n      if (true) {"),
+    ("時間の上限を見ない", "src/11_sync.js",
+     "    if (Date.now() < deadline) return true;", "    return true;"),
+    ("書けなかったぶんも「やった」と報告する", "src/11_sync.js",
+     "  plan.created = done.created;\n  plan.updated = done.updated;\n"
+     "  plan.deleted = done.deleted;\n  plan.truncated = ranOut;",
+     "  plan.truncated = ranOut;"),
     ("週次まとめのしきい値を無視する", "src/12_digest.js",
      "      if (event.impact < threshold) return false;", ""),
     ("内容ハッシュによる差分判定をやめる", "src/11_sync.js",
@@ -280,9 +314,13 @@ RESULT = re.compile(r"(\d+) passed, (\d+) failed")
 # であって件数ではないので、ここでは少なめにする。
 FUZZ_CASES = os.environ.get("MUTATE_FUZZ_N", "20")
 
+# 日を進める通し試験も同じ理由で短くする。変異ひとつの検出に必要なのは
+# 「性質が破れること」なので、日数は最小限でよい。
+LONG_RUN_DAYS = os.environ.get("MUTATE_LONG_RUN_DAYS", "5")
 
-def run_tests(timeout=180):
-    env = dict(os.environ, FUZZ_N=FUZZ_CASES)
+
+def run_tests(timeout=240):
+    env = dict(os.environ, FUZZ_N=FUZZ_CASES, LONG_RUN_DAYS=LONG_RUN_DAYS)
     try:
         proc = subprocess.run(["node", "tests/run.js"], env=env,
                               capture_output=True, text=True, timeout=timeout)
@@ -316,10 +354,40 @@ def install_signal_guards(originals):
             pass
 
 
+def sharded(items):
+    """CI では何台かに分けて回す。--shard i/n で i 番目のぶんだけを取る。
+
+    テスト一式を変異の数だけ回すので、1台では時間がかかりすぎる。
+    飛ばし飛ばしに取るので、重い変異が1台に固まらない。
+    """
+    spec = os.environ.get("MUTATE_SHARD", "")
+    for i, arg in enumerate(sys.argv):
+        if arg == "--shard" and i + 1 < len(sys.argv):
+            spec = sys.argv[i + 1]
+    if not spec:
+        return items
+    try:
+        index, total = (int(part) for part in spec.split("/", 1))
+    except ValueError:
+        print(f"--shard の書き方は i/n です: {spec}")
+        sys.exit(1)
+    if not 1 <= index <= total:
+        print(f"--shard の範囲が合いません: {spec}")
+        sys.exit(1)
+    picked = items[index - 1::total]
+    print(f"{total} 分割の {index} 番目: {len(picked)} / {len(items)} 件")
+    return picked
+
+
 def selected(argv):
     """引数があれば、名前に含まれるものだけを回す（部分一致）。"""
+    argv = [a for a in argv if not a.startswith("--")]
+    # --shard の値そのものが名前として拾われないように落とす
+    for i, arg in enumerate(sys.argv):
+        if arg == "--shard" and i + 1 < len(sys.argv) and sys.argv[i + 1] in argv:
+            argv.remove(sys.argv[i + 1])
     if not argv:
-        return MUTATIONS
+        return sharded(MUTATIONS)
     picked = [m for m in MUTATIONS if any(word in m[0] for word in argv)]
     if not picked:
         print("その名前の変異はありません: " + ", ".join(argv))

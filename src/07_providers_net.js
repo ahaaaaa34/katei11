@@ -427,7 +427,9 @@ function investingRowsToEvents_(rows, ctx) {
       forecast: row.forecast,
       previous: row.previous,
       note: indicator.why,
-      url: row.url || indicator.url,
+      // リンク先は発表元を優先する。集計サイトの個別ページは、数字を
+      // 確かめたい人が行きたい場所ではない。
+      url: indicator.url || row.url,
       extra: { rawName: row.name },
     }));
   });

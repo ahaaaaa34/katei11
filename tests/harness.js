@@ -34,6 +34,20 @@ function exportedNames(source) {
 // GAS グローバルのスタブ
 // ---------------------------------------------------------------------------
 
+/** `new Date()` だけを固定し、それ以外は素の Date と同じに振る舞うもの。 */
+function fixedDateClass(when) {
+  const fixed = when instanceof Date ? when.getTime() : new Date(when).getTime();
+  if (!isFinite(fixed)) throw new Error('now に渡した日時が読めません: ' + when);
+  class FixedDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(fixed);
+      else super(...args);
+    }
+    static now() { return fixed; }
+  }
+  return FixedDate;
+}
+
 function makeStubs(overrides = {}) {
   // `overrides.X || 既定` にすると、X: undefined を渡して「その API が
   // 無い環境」を再現できない。キーの有無で判断する。
@@ -47,6 +61,11 @@ function makeStubs(overrides = {}) {
   const stubs = {
     // 真夜中を 24 時と返す古い ICU を再現するために差し替えられるようにしておく。
     Intl: pick('Intl', Intl),
+    // 「いま」を固定できるようにしておく。本体は素の new Date() を使うが、
+    // GAS と同じく Date はグローバルなので、ここで差し替えれば効く。
+    // これが無いと、日が進む運用（窓が毎日ずれる）を通しで試せない。
+    // now: 固定した時刻。Date: 進み方まで作り込みたいときの差し替え。
+    Date: pick('Date', overrides.now === undefined ? Date : fixedDateClass(overrides.now)),
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (key) => (key in store ? store[key] : null),

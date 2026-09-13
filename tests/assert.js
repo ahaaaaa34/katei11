@@ -1,6 +1,6 @@
 /** 依存ゼロの極小テストランナー。 */
 
-const results = { passed: 0, failed: 0, failures: [] };
+const results = { passed: 0, failed: 0, failures: [], times: [] };
 let current = '';
 
 function suite(name, body) {
@@ -10,6 +10,7 @@ function suite(name, body) {
 
 function test(name, body) {
   const label = current + ' › ' + name;
+  const began = Date.now();
   try {
     body();
     results.passed++;
@@ -17,6 +18,9 @@ function test(name, body) {
     results.failed++;
     results.failures.push({ label, message: err.message });
   }
+  // 遅いテストは、変異テスト（テスト一式を何十回も回す）でそのまま
+  // 効いてくる。SLOW_TESTS=1 で、かかった時間の多い順に出す。
+  results.times.push({ label: label, ms: Date.now() - began });
 }
 
 function eq(actual, expected, hint) {
@@ -47,6 +51,11 @@ function report() {
   if (results.failed) {
     console.log('');
     results.failures.forEach((f) => console.log('  ✗ ' + f.label + '\n      ' + f.message));
+  }
+  if (process.env.SLOW_TESTS) {
+    console.log('\n──── かかった時間の多い順 ────');
+    results.times.slice().sort((a, b) => b.ms - a.ms).slice(0, 15)
+      .forEach((t) => console.log('  ' + String(t.ms).padStart(6) + ' ms  ' + t.label));
   }
   console.log('\n' + results.passed + ' passed, ' + results.failed + ' failed');
   return results.failed === 0 ? 0 : 1;
