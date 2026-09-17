@@ -55,6 +55,8 @@ const MAX_DESCRIPTION_CHARS = 8000;
 
 function toCalendarResource_(event) {
   const timezone = CONFIG.timezone;
+  // 通知は実力ランクで決める（休場で30分前に鳴らされても困る）。
+  // 色は見た目なので、件名の印と揃える。
   const tier = eventTier_(event);
   const resource = {
     id: eventCalendarId_(event, timezone),
@@ -100,7 +102,7 @@ function toCalendarResource_(event) {
     resource.end = { dateTime: event.end.toISOString(), timeZone: timezone };
   }
 
-  const color = CONFIG.colors[tier];
+  const color = lookup_(CONFIG.colors, displayTier_(event), null);
   if (color) resource.colorId = String(color).trim();
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };

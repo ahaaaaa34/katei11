@@ -122,6 +122,17 @@ MUTATIONS = [
      "      return String.fromCodePoint(code % 0x10ffff);\n"
      "    })\n"
      "    // & を最後に戻す"),
+    ("見た目の上書きを、実力ランクにも効かせる", "src/05_catalog.js",
+     "function eventTier_(event) {\n  return tierFor_(event.impact);\n}",
+     "function eventTier_(event) {\n  return displayTier_(event);\n}"),
+    ("件名の印を実力ランクで出す", "src/10_render.js",
+     "  const tier = displayTier_(event);", "  const tier = eventTier_(event);"),
+    ("markAs に知らない値も通す", "src/05_catalog.js",
+     "  return hasKey_(TIER_EMOJI_ORDER, forced) ? forced : eventTier_(event);",
+     "  return forced || eventTier_(event);"),
+    ("市場の予定をしきい値で落とす", "src/00_config.js",
+     "    include: ['market_holiday', 'market_quad_witching', 'market_index_rebalance'],",
+     "    include: [],"),
     ("値の形を確かめずに受け取る", "src/05_catalog.js",
      "  return FIGURE_SHAPE.test(value) ? value : null;", "  return value;"),
     ("リンク先を素で繋ぐ", "src/07_providers_net.js",

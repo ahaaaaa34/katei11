@@ -20,7 +20,7 @@ function stars_(impact) {
 
 function renderTitle_(event) {
   const parts = [];
-  const tier = eventTier_(event);
+  const tier = displayTier_(event);
   if (CONFIG.display.impactEmoji) parts.push(lookup_(TIER_EMOJI, tier, ''));
   const flag = lookup_(FLAGS, event.country, '');
   if (CONFIG.display.countryFlag && flag) parts.push(flag);
@@ -152,7 +152,7 @@ function renderLine_(event) {
   } else if (event.forecast) {
     figures = '  予想 ' + event.forecast;
   }
-  return when + ' ' + lookup_(TIER_EMOJI, eventTier_(event), '') + flag + ' ' + event.title + mark + figures;
+  return when + ' ' + lookup_(TIER_EMOJI, displayTier_(event), '') + flag + ' ' + event.title + mark + figures;
 }
 
 /** 週次まとめの予定かどうか。 */

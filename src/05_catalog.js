@@ -323,9 +323,30 @@ function validDate_(value) {
   return value instanceof Date && !isNaN(value.getTime());
 }
 
+/** その予定の実力ランク。通知・週次まとめ・件数の集計はこれで決まる。 */
 function eventTier_(event) {
   return tierFor_(event.impact);
 }
+
+/**
+ * 件名の印と色に使うランク。
+ *
+ * 市場の休場や SQ は「ナスダックへの影響度」で測るものではない。
+ * 休場はスコア60だが、知りたさは指標の上位と変わらない。とはいえ
+ * **スコアの方を書き換えると、データそのものが嘘になる**（通知の段や
+ * 週次まとめの選抜、品質の集計まで巻き添えになる）。
+ *
+ * そこで、見た目だけを上書きできるようにしてある。
+ * 設定は display.markAs（指標 id → ランク）。
+ */
+function displayTier_(event) {
+  const table = (CONFIG.display && CONFIG.display.markAs) || {};
+  const forced = lookup_(table, event.indicatorId, null);
+  return hasKey_(TIER_EMOJI_ORDER, forced) ? forced : eventTier_(event);
+}
+
+/** markAs に書いてよい値。知らない値は無視して、実力ランクに戻す。 */
+const TIER_EMOJI_ORDER = { S: 1, A: 2, B: 3, C: 4 };
 
 /**
  * そのイベントが同期範囲に入るか。

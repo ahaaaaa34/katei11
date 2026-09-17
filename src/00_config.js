@@ -34,7 +34,10 @@ const CONFIG = {
     minImpact: 75,
     countries: ['US', 'JP', 'EU', 'CN'],
     categories: [],   // 空 = 全カテゴリ
-    include: [],      // スコアに関係なく必ず入れる指標 id
+    // スコアに関係なく必ず入れる指標 id。
+    // 市場の休場・SQ・指数リバランスは「指標の重さ」で測るものでは
+    // ないので、しきい値を上げても残す。
+    include: ['market_holiday', 'market_quad_witching', 'market_index_rebalance'],
     exclude: [],      // 常に除外する指標 id
   },
 
@@ -103,6 +106,18 @@ const CONFIG = {
     impactEmoji: true,      // 🟥🟧🟨⬜ を件名の先頭に付ける
     countryFlag: true,
     showScore: false,       // 件名にスコアを出す
+
+    // 件名の印と色だけを、指標ごとに決めたいとき（指標 id → S/A/B/C）。
+    // **影響度そのものは変えません**。通知の段・週次まとめの選抜・
+    // 品質の集計は、これまでどおり本来のスコアで決まります。
+    //
+    // 市場の休場(60)・SQ(70)・銘柄入替(58) は本来 🟨 ですが、
+    // 指標の重さで測るものではないので 🟧 で出しています。
+    markAs: {
+      market_holiday: 'A',
+      market_quad_witching: 'A',
+      market_index_rebalance: 'A',
+    },
   },
 
   // 通知。ランクごとに「何分前か」で指定します。

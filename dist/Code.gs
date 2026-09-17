@@ -50,7 +50,10 @@ const CONFIG = {
     minImpact: 75,
     countries: ['US', 'JP', 'EU', 'CN'],
     categories: [],   // 空 = 全カテゴリ
-    include: [],      // スコアに関係なく必ず入れる指標 id
+    // スコアに関係なく必ず入れる指標 id。
+    // 市場の休場・SQ・指数リバランスは「指標の重さ」で測るものでは
+    // ないので、しきい値を上げても残す。
+    include: ['market_holiday', 'market_quad_witching', 'market_index_rebalance'],
     exclude: [],      // 常に除外する指標 id
   },
 
@@ -119,6 +122,18 @@ const CONFIG = {
     impactEmoji: true,      // 🟥🟧🟨⬜ を件名の先頭に付ける
     countryFlag: true,
     showScore: false,       // 件名にスコアを出す
+
+    // 件名の印と色だけを、指標ごとに決めたいとき（指標 id → S/A/B/C）。
+    // **影響度そのものは変えません**。通知の段・週次まとめの選抜・
+    // 品質の集計は、これまでどおり本来のスコアで決まります。
+    //
+    // 市場の休場(60)・SQ(70)・銘柄入替(58) は本来 🟨 ですが、
+    // 指標の重さで測るものではないので 🟧 で出しています。
+    markAs: {
+      market_holiday: 'A',
+      market_quad_witching: 'A',
+      market_index_rebalance: 'A',
+    },
   },
 
   // 通知。ランクごとに「何分前か」で指定します。
@@ -1935,9 +1950,30 @@ function validDate_(value) {
   return value instanceof Date && !isNaN(value.getTime());
 }
 
+/** その予定の実力ランク。通知・週次まとめ・件数の集計はこれで決まる。 */
 function eventTier_(event) {
   return tierFor_(event.impact);
 }
+
+/**
+ * 件名の印と色に使うランク。
+ *
+ * 市場の休場や SQ は「ナスダックへの影響度」で測るものではない。
+ * 休場はスコア60だが、知りたさは指標の上位と変わらない。とはいえ
+ * **スコアの方を書き換えると、データそのものが嘘になる**（通知の段や
+ * 週次まとめの選抜、品質の集計まで巻き添えになる）。
+ *
+ * そこで、見た目だけを上書きできるようにしてある。
+ * 設定は display.markAs（指標 id → ランク）。
+ */
+function displayTier_(event) {
+  const table = (CONFIG.display && CONFIG.display.markAs) || {};
+  const forced = lookup_(table, event.indicatorId, null);
+  return hasKey_(TIER_EMOJI_ORDER, forced) ? forced : eventTier_(event);
+}
+
+/** markAs に書いてよい値。知らない値は無視して、実力ランクに戻す。 */
+const TIER_EMOJI_ORDER = { S: 1, A: 2, B: 3, C: 4 };
 
 /**
  * そのイベントが同期範囲に入るか。
@@ -3787,7 +3823,7 @@ function stars_(impact) {
 
 function renderTitle_(event) {
   const parts = [];
-  const tier = eventTier_(event);
+  const tier = displayTier_(event);
   if (CONFIG.display.impactEmoji) parts.push(lookup_(TIER_EMOJI, tier, ''));
   const flag = lookup_(FLAGS, event.country, '');
   if (CONFIG.display.countryFlag && flag) parts.push(flag);
@@ -3919,7 +3955,7 @@ function renderLine_(event) {
   } else if (event.forecast) {
     figures = '  予想 ' + event.forecast;
   }
-  return when + ' ' + lookup_(TIER_EMOJI, eventTier_(event), '') + flag + ' ' + event.title + mark + figures;
+  return when + ' ' + lookup_(TIER_EMOJI, displayTier_(event), '') + flag + ' ' + event.title + mark + figures;
 }
 
 /** 週次まとめの予定かどうか。 */
@@ -3988,6 +4024,8 @@ const MAX_DESCRIPTION_CHARS = 8000;
 
 function toCalendarResource_(event) {
   const timezone = CONFIG.timezone;
+  // 通知は実力ランクで決める（休場で30分前に鳴らされても困る）。
+  // 色は見た目なので、件名の印と揃える。
   const tier = eventTier_(event);
   const resource = {
     id: eventCalendarId_(event, timezone),
@@ -4033,7 +4071,7 @@ function toCalendarResource_(event) {
     resource.end = { dateTime: event.end.toISOString(), timeZone: timezone };
   }
 
-  const color = CONFIG.colors[tier];
+  const color = lookup_(CONFIG.colors, displayTier_(event), null);
   if (color) resource.colorId = String(color).trim();
   if (event.url && event.url.indexOf('http') === 0) {
     resource.source = { title: event.title.slice(0, 60), url: event.url };

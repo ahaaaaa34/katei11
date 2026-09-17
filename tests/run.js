@@ -6407,6 +6407,98 @@ suite('実機で出た不具合', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('市場の予定は、しきい値と別に扱う', () => {
+  // 休場・SQ・銘柄入替は「ナスダックへの影響度」で測るものではない。
+  // しきい値を上げても残し、件名の印は重要枠に揃える。ただし
+  // **スコアそのものは書き換えない**（そこを偽ると、通知の段・
+  // 週次まとめの選抜・品質の集計まで巻き添えで嘘になる）。
+  const PINNED = ['market_holiday', 'market_quad_witching', 'market_index_rebalance'];
+
+  const offline = () => {
+    const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-17T12:00:00Z',
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.CONFIG.window.daysAhead = 150;
+    return api;
+  };
+
+  test('しきい値を上げても、市場の予定は残る', () => {
+    const api = offline();
+    ok(api.CONFIG.filter.minImpact > 60, '前提: 休場(60)が落ちるしきい値であること');
+    const ids = {};
+    api.collectEvents_(api.syncWindow_()).forEach((e) => { ids[e.indicatorId] = true; });
+    PINNED.forEach((id) => ok(ids[id], id + ' が落ちている'));
+  });
+
+  test('件名の印は 🟧 に揃える', () => {
+    const api = offline();
+    api.collectEvents_(api.syncWindow_())
+      .filter((e) => PINNED.indexOf(e.indicatorId) !== -1)
+      .forEach((e) => {
+        eq(api.displayTier_(e), 'A', e.indicatorId);
+        ok(api.renderTitle_(e).indexOf('🟧') === 0, api.renderTitle_(e));
+      });
+  });
+
+  test('スコアそのものは書き換えない', () => {
+    // ここが崩れると、説明文の影響度も週次まとめの選抜も嘘になる。
+    const api = offline();
+    eq(api.indicator_('market_holiday').impact, 60);
+    eq(api.indicator_('market_quad_witching').impact, 70);
+    eq(api.indicator_('market_index_rebalance').impact, 58);
+    const holiday = api.collectEvents_(api.syncWindow_())
+      .find((e) => e.indicatorId === 'market_holiday');
+    ok(holiday, '休場が出ていない');
+    eq(api.eventTier_(holiday), 'B', '実力ランクまで変えてはいけない');
+    ok(api.renderDescription_(holiday).indexOf('60/100') !== -1,
+       '説明文のスコアが実際と違う');
+  });
+
+  test('通知は実力ランクのまま（休場で鳴らさない）', () => {
+    const api = offline();
+    api.collectEvents_(api.syncWindow_())
+      .filter((e) => PINNED.indexOf(e.indicatorId) !== -1)
+      .forEach((e) => {
+        eq(api.toCalendarResource_(e).reminders.overrides, [],
+           e.indicatorId + ' で通知が鳴る');
+      });
+  });
+
+  test('markAs に知らない値を書いても、実力ランクに戻るだけ', () => {
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const start = api.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York');
+    const make = (id, impact) => api.makeEvent_({ indicatorId: id, title: 'x', start: start,
+      end: new Date(start.getTime() + 1800000), impact: impact, country: 'US',
+      category: 'market', confidence: 'rule' });
+    [null, undefined, '', 'Z', 'a', 0, {}, '__proto__', 'toString'].forEach((value) => {
+      api.CONFIG.display.markAs = { probe: value };
+      eq(api.displayTier_(make('probe', 60)), 'B', JSON.stringify(value));
+    });
+    // 正しい値は効く
+    api.CONFIG.display.markAs = { probe: 'S' };
+    eq(api.displayTier_(make('probe', 60)), 'S');
+    // markAs 自体が無くても落ちない
+    delete api.CONFIG.display.markAs;
+    eq(api.displayTier_(make('probe', 60)), 'B');
+  });
+
+  test('印を変えても、週次まとめの選抜は実力で決まる', () => {
+    // まとめは「最重要(S)」を拾う。見た目の上書きで混ざってはいけない。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    api.CONFIG.display.markAs = { market_holiday: 'S' };
+    const start = api.zonedTime_(Y(2026, 9, 14), '08:30', 'America/New_York');
+    const holiday = api.makeEvent_({ indicatorId: 'market_holiday', title: '休場',
+      start: start, end: new Date(start.getTime() + 86400000), impact: 60,
+      country: 'US', category: 'market', confidence: 'rule', allDay: true });
+    eq(api.displayTier_(holiday), 'S', '前提: 見た目は S になっている');
+    eq(api.eventTier_(holiday), 'B', 'まとめの選抜は実力ランクのまま');
+  });
+});
+
 // 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
 require('./props').registerPropertyTests({
   suite, test, eq, ok, loadGas, fakeCalendar,

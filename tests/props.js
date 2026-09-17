@@ -156,6 +156,17 @@ function fakeNetwork(up, pad) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * その指標が「しきい値に関係なく残す」と名指しされているか。
+ *
+ * 市場の休場・SQ・銘柄入替は影響度で測るものではないので、
+ * include に書いて残してある。しきい値の性質はそれを除いて見る。
+ */
+function isPinned_(api, indicatorId) {
+  const list = (api.CONFIG.filter && api.CONFIG.filter.include) || [];
+  return list.indexOf(indicatorId) !== -1;
+}
+
 function registerPropertyTests(env) {
   const { suite, test, eq, ok, loadGas, fakeCalendar } = env;
 
@@ -351,8 +362,9 @@ function registerPropertyTests(env) {
           }
         });
 
-        // しきい値より下のものが混ざっていない
-        if (Number(props.impact) < spec.minImpact) {
+        // しきい値より下のものが混ざっていない。
+        // ただし include に書いたものは、人が名指しで残したものなので別。
+        if (Number(props.impact) < spec.minImpact && !isPinned_(api, props.indicator)) {
           record('しきい値より下は入らない', spec,
                  item.id + ' ' + props.impact + ' < ' + spec.minImpact);
         }
@@ -466,7 +478,7 @@ function registerPropertyTests(env) {
       }
       [...calendar.events.values()].forEach((item) => {
         const props = item.extendedProperties.private || {};
-        if (Number(props.impact) < 99) {
+        if (Number(props.impact) < 99 && !isPinned_(after.api, props.indicator)) {
           record('しきい値を上げたら下回るものは消える', spec,
                  item.id + ' ' + props.impact);
         }
