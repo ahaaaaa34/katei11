@@ -6499,6 +6499,83 @@ suite('市場の予定は、しきい値と別に扱う', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('全部消す', () => {
+  const OFFLINE = { fetch: () => { throw new Error('down'); },
+    fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503, getContentText: () => '' })) };
+  const mk = (calendar, store, now, extra) => {
+    const api = loadGas(Object.assign({ Calendar: calendar, properties: store, now: now,
+                                        UrlFetchApp: OFFLINE }, extra || {}));
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    return api;
+  };
+
+  test('同期範囲の外に残った古い予定も消す', () => {
+    // 「全部」と言いながら同期範囲しか見ていないと、前の月に書いた
+    // 予定が居残る。名前どおりに全部消すこと。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    mk(calendar, store, '2026-06-17T12:00:00Z').syncCalendar();
+    const old = calendar.events.size;
+    ok(old > 10, '前提: 3か月前のぶんが入っていること');
+    mk(calendar, store, '2026-09-17T12:00:00Z').syncCalendar();
+    ok(calendar.events.size > old, '前提: 新しいぶんも増えていること');
+
+    const text = mk(calendar, store, '2026-09-17T12:00:00Z').removeAllEvents();
+    eq(calendar.events.size, 0, '消し残りがある');
+    ok(text.indexOf('件を削除しました') !== -1, text);
+  });
+
+  test('このツールが作っていない予定は消さない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    mk(calendar, store, '2026-09-17T12:00:00Z').syncCalendar();
+    calendar.events.set('mine', {
+      id: 'mine', summary: '自分の予定',
+      start: { dateTime: '2026-09-20T01:00:00.000Z' },
+      end: { dateTime: '2026-09-20T02:00:00.000Z' },
+      extendedProperties: { private: {} },
+    });
+    mk(calendar, store, '2026-09-17T12:00:00Z').removeAllEvents();
+    eq([...calendar.events.keys()], ['mine'], '人の予定まで消した');
+  });
+
+  test('自動実行が動いていることを知らせる', () => {
+    // 消しただけだと、次の回でまた作られる。そこを黙っていると
+    // 「消えない」と見える。
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const scriptApp = fakeScriptApp();
+    mk(calendar, store, '2026-09-17T12:00:00Z', { ScriptApp: scriptApp }).installTriggers();
+    mk(calendar, store, '2026-09-17T12:00:00Z', { ScriptApp: scriptApp }).syncCalendar();
+
+    const text = mk(calendar, store, '2026-09-17T12:00:00Z',
+                    { ScriptApp: scriptApp }).removeAllEvents();
+    ok(text.indexOf('自動実行は動いたままです') !== -1, text);
+    ok(text.indexOf('uninstall()') !== -1, text);
+  });
+
+  test('自動実行が止まっていれば、余計なことを言わない', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    mk(calendar, store, '2026-09-17T12:00:00Z', { ScriptApp: fakeScriptApp() }).syncCalendar();
+    const text = mk(calendar, store, '2026-09-17T12:00:00Z',
+                    { ScriptApp: fakeScriptApp() }).removeAllEvents();
+    ok(text.indexOf('自動実行は動いたままです') === -1, text);
+  });
+
+  test('消したあとに同期すれば、また入る', () => {
+    const calendar = fakeCalendar();
+    const store = { _calendarId: 'c', _calendarName: '経済指標 (Nasdaq)' };
+    const before = mk(calendar, store, '2026-09-17T12:00:00Z').syncCalendar();
+    mk(calendar, store, '2026-09-17T12:00:00Z').removeAllEvents();
+    eq(calendar.events.size, 0);
+    const again = mk(calendar, store, '2026-09-17T12:00:00Z').syncCalendar();
+    eq(again.created.length, before.created.length, '同じ件数で戻ること');
+  });
+});
+
 // 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
 require('./props').registerPropertyTests({
   suite, test, eq, ok, loadGas, fakeCalendar,

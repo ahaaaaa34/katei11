@@ -5877,11 +5877,18 @@ function countTriggers_() {
 // ---------------------------------------------------------------------------
 
 /** このツールが作った予定を、同期期間の範囲で削除する。 */
+/** removeAllEvents が探す範囲。「全部」と言う以上、同期範囲では足りない。 */
+const REMOVE_ALL_YEARS = 5;
+
 function removeAllEvents() {
-  const ctx = syncWindow_();
+  // 同期範囲だけを見ると、**過去の回で書いた古い予定が残る**。
+  // 名前が「全部」なのだから、前後5年ぶんを見る。
+  const today = localDate_(new Date(), CONFIG.timezone);
+  const from = addDays_(today, -365 * REMOVE_ALL_YEARS);
+  const to = addDays_(today, 365 * REMOVE_ALL_YEARS);
   const items = withCalendarRecovery_(function () {
     const calendarId = resolveCalendarId_(false);
-    const found = listManagedEvents_(calendarId, ctx.start, ctx.end);
+    const found = listManagedEvents_(calendarId, from, to);
     found.forEach(function (item) {
       try {
         calendarCall_(function () { return Calendar.Events.remove(calendarId, item.id); });
@@ -5891,7 +5898,15 @@ function removeAllEvents() {
     });
     return found;
   });
-  const message = items.length + ' 件を削除しました。';
+  const lines = [items.length + ' 件を削除しました（'
+                 + dateKey_(from) + ' 〜 ' + dateKey_(to) + ' を対象）。'];
+  if (countTriggers_() > 0) {
+    lines.push('自動実行は動いたままです。次の回（毎日 '
+               + CONFIG.triggers.morningHour + '時 / '
+               + CONFIG.triggers.eveningHour + '時ごろ）にまた作られます。');
+    lines.push('止めるなら uninstall() を実行してください。');
+  }
+  const message = lines.join('\n');
   log_(message);
   return message;
 }
