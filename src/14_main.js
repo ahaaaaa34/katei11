@@ -12,6 +12,7 @@
  *   checkOfficialTimes() 発表予定表（時刻の一次情報）が読めているか確かめる
  *   checkFomcAutoFetch() FOMC 日程の自動取得が今どう動くかを確かめる
  *   checkSourceUrls()   解説に出す発表元リンクが生きているか確かめる
+ *   debugSchedulePage() 発表予定表が読めないとき、実物がどう書かれているかを出す
  *   runTests()          日付計算などの自己テスト
  */
 
@@ -644,6 +645,86 @@ function checkOfficialTimes() {
   const text = lines.join('\n');
   log_(text);
   return text;
+}
+
+/** 本文の抜粋をどこから採るかの目印。 */
+const MONTH_WORD =
+  /\b(January|February|March|April|May|June|July|August|September|October|November|December)\b/i;
+
+/**
+ * 発表予定表が読めないとき、**そのページが実際どう書かれているか**を出す。
+ *
+ * 解析は「1行の中に日付・時刻・名前が並ぶ」という形だけを見ている。
+ * 0行になるのは、表の作りがその想定と違うから。だが中身を見ないと
+ * どう違うのか分からない。実行した人がここに出たものを貼れば、
+ * 実物に合わせて直せる。
+ *
+ *   debugSchedulePage()              設定にある予定表を全部見る
+ *   debugSchedulePage('https://…')   ひとつだけ見る
+ */
+function debugSchedulePage(url) {
+  const sources = url
+    ? [{ name: '指定された URL', url: url, tz: ET }]
+    : (CONFIG.officialSchedules || []);
+  const year = localDate_(new Date(), CONFIG.timezone).getUTCFullYear();
+  const lines = ['発表予定表の中身を見る', ''];
+
+  sources.forEach(function (source) {
+    const target = String(source.url || '').replace(/\{\{year\}\}/g, String(year));
+    lines.push('■ ' + source.name);
+    lines.push('   ' + target);
+
+    const html = fetchText_(target);
+    if (html === null) {
+      lines.push('   ❌ 取得できませんでした（HTTP の行が上に出ています）');
+      lines.push('');
+      return;
+    }
+    lines.push('   取得できました: ' + html.length + ' 文字');
+
+    // どの入れ物が何個あるか。ここで表の作りが分かる。
+    [['<table', 'table'], ['<tr', 'tr'], ['<td', 'td'], ['<th', 'th'],
+     ['<li', 'li'], ['<dl', 'dl'], ['<dt', 'dt'],
+     ['role="row"', 'role=row'], ['<div', 'div']].forEach(function (pair) {
+      const count = html.split(pair[0]).length - 1;
+      if (count) lines.push('     ' + pair[1] + ': ' + count + ' 個');
+    });
+
+    const rows = parseScheduleRows_(html, year);
+    lines.push('   こちらが読めた行: ' + rows.length + ' 行');
+    rows.slice(0, 5).forEach(function (row) {
+      lines.push('     ' + dateKey_(row.date) + ' ' + row.time + '  ' + row.name);
+    });
+
+    if (!rows.length) {
+      // 1行目の中身をそのまま見せる。ここに答えがある。
+      const first = /<tr\b[^>]*>([\s\S]*?)<\/tr>/i.exec(html);
+      if (first) {
+        const cells = [];
+        const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+        let cell;
+        while ((cell = cellRe.exec(first[1])) !== null) cells.push(plainText_(cell[1]));
+        lines.push('   最初の行の各欄:');
+        cells.forEach(function (text, i) {
+          lines.push('     [' + i + '] ' + JSON.stringify(text.slice(0, 60)));
+        });
+        if (!cells.length) lines.push('     （td も th も見つかりません）');
+      } else {
+        lines.push('   <tr> が1つもありません。表ではない書き方のようです。');
+      }
+      // 素のテキストを少し。日付と時刻がどう書かれているかを見る。
+      const text = plainText_(html).replace(/\s+/g, ' ');
+      const at = text.search(MONTH_WORD);
+      lines.push('   本文の抜粋（' + (at >= 0 ? '最初の月名のあたり' : '先頭') + '）:');
+      lines.push('     ' + text.slice(at >= 0 ? at : 0, (at >= 0 ? at : 0) + 400));
+    }
+    lines.push('');
+  });
+
+  lines.push('この出力をそのまま貼ってください。実物に合わせて解析を直します。');
+  const out = lines.join('\n');
+  log_(out);
+  return out;
 }
 
 /**

@@ -163,6 +163,7 @@ Slack / Discord に週次のまとめを流したい場合は、同じ場所に
 | `verifyRules` | 発表規則の当たり具合を、FRED の過去の実績で測る |
 | `checkFomcAutoFetch` | FOMC 日程の自動取得が今どう動くかを確認する |
 | `checkSourceUrls` | **解説に出す発表元のリンクが生きているかを、実際に叩いて確かめる** |
+| `debugSchedulePage` | **発表予定表が読めないとき、実物がどう書かれているかを出す** |
 | `runTests` | 日付計算などの自己テスト。環境がおかしくないかを確認する |
 | `removeAllEvents` | このツールが作った予定を**全部**削除する（前後5年ぶん）。人が入れた予定には触らない |
 | `uninstall` | 自動実行を止める（予定は残る） |
@@ -433,7 +434,7 @@ Investing.com の公開エンドポイントを読みます。**公式 API で�
 ## 開発
 
 ```bash
-npm test          # 534 テスト・ネットワーク不要
+npm test          # 540 テスト・ネットワーク不要
 npm run bundle    # src/*.js → dist/Code.gs
 npm run coverage  # 一度も呼ばれていない関数を洗い出す
 npm run mutate    # テストが本当にバグを捕まえるかを検査（下記・30分ほど）
@@ -452,7 +453,7 @@ npm run check     # test + lint + golden + mutate:check + bundle
 検証されます。FOMC 日程の自動取得も、公式ページを模した HTML を食わせて
 「壊れた日程を確実に捨てるか」「手入力を上書きしないか」を確認しています。
 
-`npm run coverage` は関数単位の実行カバレッジを出します（現在 210/210）。
+`npm run coverage` は関数単位の実行カバレッジを出します（現在 211/211）。
 呼ばれていない関数は、テストが通っていても何も保証されていません。
 
 ### 差分テスト（独立実装との突き合わせ）

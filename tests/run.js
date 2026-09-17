@@ -6576,6 +6576,70 @@ suite('全部消す', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('読めないページの中身を見る', () => {
+  // 実機で official が 0 件になった。ページは取れているのに解析が0行。
+  // 実物を見ないと直せないので、中身を出す手立てを用意する。
+  const page = (html) => loadGas({ Calendar: fakeCalendar(),
+    UrlFetchApp: { fetch: () => ({ getResponseCode: () => 200,
+                                   getContentText: () => html }) } });
+
+  test('表ではない書き方だと、そう言う', () => {
+    const api = page('<ul><li>September 11, 2026 - Consumer Price Index - 8:30 AM</li></ul>');
+    const text = api.debugSchedulePage('https://example.gov/s');
+    ok(text.indexOf('<tr> が1つもありません') !== -1, text);
+    ok(text.indexOf('li: 1 個') !== -1, text);
+    // 本文の抜粋に、日付と時刻の書き方が見えること
+    ok(text.indexOf('September 11, 2026') !== -1, text);
+    ok(text.indexOf('8:30 AM') !== -1, text);
+  });
+
+  test('表はあるが欄が読めないときは、各欄の中身を出す', () => {
+    const api = page('<table><tr><td>Sep 11</td><td>CPI</td><td>朝</td></tr></table>');
+    const text = api.debugSchedulePage('https://example.gov/s');
+    ok(text.indexOf('最初の行の各欄') !== -1, text);
+    ok(text.indexOf('"Sep 11"') !== -1, text);
+    ok(text.indexOf('"CPI"') !== -1, text);
+    ok(text.indexOf('"朝"') !== -1, text);
+  });
+
+  test('読めているときは、読めた行を出す', () => {
+    const api = page('<table>'
+      + '<tr><td>September 11, 2026</td><td>Consumer Price Index</td><td>08:30 AM</td></tr>'
+      + '<tr><td>September 14, 2026</td><td>Producer Price Index</td><td>08:30 AM</td></tr>'
+      + '<tr><td>September 16, 2026</td><td>Employment Situation</td><td>08:30 AM</td></tr>'
+      + '</table>');
+    const text = api.debugSchedulePage('https://example.gov/s');
+    ok(text.indexOf('こちらが読めた行: 3 行') !== -1, text);
+    ok(text.indexOf('2026-09-11 08:30') !== -1, text);
+  });
+
+  test('取得できないときは、そう言って落ちない', () => {
+    const api = loadGas({ Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); } } });
+    const text = api.debugSchedulePage('https://example.gov/s');
+    ok(text.indexOf('取得できませんでした') !== -1, text);
+  });
+
+  test('URL を渡さなければ、設定にある予定表を全部見る', () => {
+    const api = page('<p>x</p>');
+    const text = api.debugSchedulePage();
+    (api.CONFIG.officialSchedules || []).forEach((source) => {
+      ok(text.indexOf(source.name) !== -1, source.name + ' が出ていない');
+    });
+  });
+
+  test('{{year}} は今年に置き換わる', () => {
+    const asked = [];
+    const api = loadGas({ Calendar: fakeCalendar(), now: '2026-09-17T12:00:00Z',
+      UrlFetchApp: { fetch: (url) => { asked.push(url);
+        return { getResponseCode: () => 200, getContentText: () => '<p>x</p>' }; } } });
+    api.debugSchedulePage();
+    ok(asked.some((u) => u.indexOf('2026') !== -1), JSON.stringify(asked));
+    ok(!asked.some((u) => u.indexOf('{{year}}') !== -1), JSON.stringify(asked));
+  });
+});
+
 // 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
 require('./props').registerPropertyTests({
   suite, test, eq, ok, loadGas, fakeCalendar,
