@@ -6233,6 +6233,171 @@ suite('夏時間の切替日の約束ごと', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+suite('実機で出た不具合', () => {
+  // 2026-09-17、初めて実物の Apps Script で動かしたときのログから。
+  // FRED は動いた（25件）。そのうえで3つ問題が出た。
+
+  test('記録に残す URL から、鍵を伏せる', () => {
+    // 取得に失敗すると URL をそのままログに出していた。FRED の API キーは
+    // URL に載るので、実行ログの画面を見せた相手に鍵が渡る。実際に起きた。
+    const api = loadGas({ Calendar: fakeCalendar() });
+    const masked = api.safeUrl_(
+      'https://api.stlouisfed.org/fred/releases/dates?api_key=0123456789abcdef&file_type=json');
+    ok(masked.indexOf('0123456789abcdef') === -1, masked);
+    ok(masked.indexOf('api_key=****cdef') !== -1, masked);
+    ok(masked.indexOf('file_type=json') !== -1, '他の項目は残すこと: ' + masked);
+
+    ['token', 'access_token', 'secret', 'password', 'apikey', 'key', 'auth'].forEach((name) => {
+      const out = api.safeUrl_('https://x.example/a?' + name + '=supersecretvalue&b=1');
+      ok(out.indexOf('supersecretvalue') === -1, name + ': ' + out);
+    });
+    // 短い値は末尾も見せない
+    eq(api.safeUrl_('https://x.example/a?key=ab'), 'https://x.example/a?key=****');
+    // 鍵が無ければそのまま
+    const plain = 'https://www.bls.gov/schedule/news_release/2026_sched.htm';
+    eq(api.safeUrl_(plain), plain);
+  });
+
+  test('取得に失敗しても、ログに鍵が出ない', () => {
+    const logs = [];
+    const api = loadGas({ Calendar: fakeCalendar(), log: (line) => logs.push(String(line)),
+      UrlFetchApp: { fetch: () => ({ getResponseCode: () => 504,
+                                     getContentText: () => '' }) } });
+    api._store.FRED_API_KEY = 'zzzzsecretkeyzzzz';
+    api.providerFred_({ start: Y(2026, 9, 1), end: Y(2026, 11, 30), timezone: 'Asia/Tokyo' });
+    const text = logs.join('\n');
+    ok(text.indexOf('zzzzsecretkeyzzzz') === -1, '鍵がログに出ている:\n' + text);
+    ok(text.indexOf('HTTP 504') !== -1, '失敗そのものは記録すること:\n' + text);
+  });
+
+  test('FRED が 504 を返しても、一度は試し直す', () => {
+    // 実機では2ページ目で 504 が出た。そこで諦めると窓の後半が抜ける。
+    let calls = 0;
+    const api = loadGas({ Calendar: fakeCalendar(),
+      UrlFetchApp: { fetch: () => {
+        calls++;
+        // 1回目だけ失敗させる
+        if (calls === 1) return { getResponseCode: () => 504, getContentText: () => '' };
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({
+          count: 1, release_dates: [{ release_name: 'Consumer Price Index',
+                                      date: '2026-09-11' }] }) };
+      } } });
+    api._store.FRED_API_KEY = 'k';
+    const events = api.providerFred_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
+                                       timezone: 'Asia/Tokyo' });
+    eq(calls, 2, '試し直していない');
+    eq(events.length, 1, '試し直したぶんが使われていない');
+    eq(events[0].indicatorId, 'us_cpi');
+  });
+
+  test('新規失業保険は、全国のぶんだけに当てる', () => {
+    // 実機のログ: us_jobless_claims ← 2 種類の release に一致
+    const api = loadGas({ Calendar: fakeCalendar() });
+    eq(api.matchFredRelease_('Unemployment Insurance Weekly Claims Report').id,
+       'us_jobless_claims');
+    eq(api.matchFredRelease_('State Unemployment Insurance Weekly Claims Report'),
+       null, '州別のぶんに当たってはいけない');
+  });
+
+  // 途中で時計が飛ぶ環境。何回目の now() から飛ぶかを指定する。
+  const clockAfter = (calls) => {
+    let seen = 0;
+    return class Jumpy extends Date {
+      constructor(...args) {
+        if (args.length === 0) super(Jumpy.now());
+        else super(...args);
+      }
+      static now() {
+        return Date.UTC(2026, 8, 17) + (seen++ >= calls ? 10 * 60 * 1000 : 0);
+      }
+    };
+  };
+
+  test('集める段で時間が尽きたら、残りの情報源だけを見送る', () => {
+    // 実機では決算の取得で6分を使い切り、カレンダーに何も書けなかった。
+    const logs = [];
+    const api = loadGas({ Calendar: fakeCalendar(), Date: clockAfter(6),
+      log: (l) => logs.push(String(l)),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    // 決算は切って、集める段の見送りだけを見る（両方あると互いを隠す）。
+    Object.assign(api.CONFIG.providers, { rules: true, fomc: true, market: true,
+                                          officialTimes: true, fred: false,
+                                          earnings: false, investing: false });
+    api.startRunClock_();
+    api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 11, 30), timezone: 'Asia/Tokyo' });
+    const text = logs.join('\n');
+    ok(/情報源 \w+: 時間が足りないため今回は見送ります/.test(text),
+       '見送りを知らせていない:\n' + text);
+    ok(api.downSources_().indexOf('official') !== -1,
+       '見送った情報源が、落ちている扱いになっていない: '
+       + JSON.stringify(api.downSources_()));
+  });
+
+  test('見送った情報源の予定は、消さずに残す', () => {
+    // ここが効かないと、たまたま重かった日にカレンダーから消える。
+    // 予定の中身は素の時計で作る（差し替えた Date だと、外で作った
+    // Date が instanceof を通らない）。
+    const plain = loadGas({ Calendar: fakeCalendar() });
+    const stored = [plain.toCalendarResource_(event(plain, {
+      indicatorId: 'us_cpi', impact: 98, source: 'official',
+      start: plain.zonedTime_(Y(2026, 9, 11), '08:30', 'America/New_York') }))];
+
+    const api = loadGas({ Calendar: fakeCalendar(), Date: clockAfter(6) });
+    Object.assign(api.CONFIG.providers, { rules: true, fomc: true, market: true,
+                                          officialTimes: true, fred: false,
+                                          earnings: false, investing: false });
+    const ctx = { start: Y(2026, 9, 1), end: Y(2026, 9, 30), timezone: 'Asia/Tokyo' };
+    api.startRunClock_();
+    api.collectEvents_(ctx);
+    ok(api.downSources_().indexOf('official') !== -1, '前提: official を見送っていること');
+    eq(api.buildPlan_('c', [], stored, ctx).deleted.length, 0,
+       '見送った情報源の予定を消している');
+  });
+
+  test('決算の取得も、途中で時間が尽きたら切り上げる', () => {
+    // 営業日1日につき1リクエスト。窓が広いと数十回になる。
+    // 「1回取りに行ったら時間が尽きた」を、取得の回数そのもので作る。
+    let batches = 0;
+    const Jumpy = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) super(Jumpy.now());
+        else super(...args);
+      }
+      static now() {
+        return Date.UTC(2026, 8, 17) + (batches >= 1 ? 10 * 60 * 1000 : 0);
+      }
+    };
+    const api = loadGas({ Calendar: fakeCalendar(), Date: Jumpy,
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => { batches++;
+                       return rs.map(() => ({ getResponseCode: () => 200,
+                         getContentText: () => JSON.stringify({ data: { rows: [] } }) })); } } });
+    api.startRunClock_();
+    api.providerEarnings_({ start: Y(2026, 9, 1), end: Y(2026, 11, 30),
+                            timezone: 'Asia/Tokyo' });
+    eq(batches, 1, '時間が尽きても取り続けている: ' + batches + ' 回');
+    ok(api.downSources_().indexOf('earnings') !== -1,
+       '途中までしか取れていないのに、落ちている扱いにしていない');
+  });
+
+  test('どの情報源に何秒かかったかを、ログに残す', () => {
+    // 遅い取得先は実行時間の上限に直結する。次に詰まったとき、
+    // どれが重いのかがログだけで分かるようにしておく。
+    const logs = [];
+    const api = loadGas({ Calendar: fakeCalendar(), log: (l) => logs.push(String(l)),
+      UrlFetchApp: { fetch: () => { throw new Error('down'); },
+                     fetchAll: (rs) => rs.map(() => ({ getResponseCode: () => 503,
+                                                       getContentText: () => '' })) } });
+    Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
+                                          fomcAutoFetch: false, officialTimes: false });
+    api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 11, 15), timezone: 'Asia/Tokyo' });
+    ok(/rules: \d+ 件（[\d.]+ 秒）/.test(logs.join('\n')), logs.join('\n'));
+  });
+});
+
 // 性質テスト（でたらめな設定で回す。詳しくは tests/props.js）
 require('./props').registerPropertyTests({
   suite, test, eq, ok, loadGas, fakeCalendar,

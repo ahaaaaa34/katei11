@@ -194,7 +194,10 @@ const INDICATORS = [
       weekday: "thu",
       exact: true
     },
-    fred_release: "Unemployment Insurance Weekly Claims",
+    // FRED には州別（State Unemployment Insurance Weekly Claims Report）と
+    // 全国（Unemployment Insurance Weekly Claims Report）の2つがある。
+    // 頭に固定して、全国のぶんだけに当てる。実際に両方へ当たっていた。
+    fred_release: "^Unemployment Insurance Weekly Claims",
     url: "https://oui.doleta.gov/unemploy/claims.asp",
     why: "唯一の週次高頻度雇用データ。労働市場の転換点をいち早く映すため、景気後退 懸念が高まる局面では月次指標より材料視される。",
     match: ["initial jobless claims", "continuing jobless claims"]

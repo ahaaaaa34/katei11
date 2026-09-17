@@ -306,7 +306,29 @@ MUTATIONS = [
      "      const silent = downSources_();\n      if (silent.length) {",
      "      const silent = downSources_();\n      if (true) {"),
     ("時間の上限を見ない", "src/11_sync.js",
-     "    if (Date.now() < deadline) return true;", "    return true;"),
+     "    if (timeLeftFor_(WRITE_RESERVE_MS)) return true;", "    return true;"),
+    ("集める段で時間を見ない", "src/09_collect.js",
+     "    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {\n"
+     "      log_('情報源 ' + provider.name + ': 時間が足りないため今回は見送ります。');",
+     "    if (false) {\n"
+     "      log_('情報源 ' + provider.name + ': 時間が足りないため今回は見送ります。');"),
+    ("見送った情報源を落ちている扱いにしない", "src/09_collect.js",
+     "      markSourceDown_(provider.name, '時間切れのため今回は取得していません');", ""),
+    ("決算の取得で時間を見ない", "src/07_providers_net.js",
+     "    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {\n"
+     "      log_('決算: 時間が足りないため ' + i + ' 日ぶんで切り上げます'",
+     "    if (false) {\n"
+     "      log_('決算: 時間が足りないため ' + i + ' 日ぶんで切り上げます'"),
+    ("FRED の 504 で諦める", "src/07_providers_net.js",
+     "      sleep_(2000);\n      payload = fetchJson_(url);", ""),
+    ("ログに鍵をそのまま出す", "src/03_util.js",
+     "    log_('HTTP ' + code + ': ' + safeUrl_(url));",
+     "    log_('HTTP ' + code + ': ' + url);"),
+    ("鍵の伏せ方を緩める", "src/03_util.js",
+     "    if (value.length <= 4) return head + '****';", ""),
+    ("州別の失業保険も全国として採る", "src/01_indicators.js",
+     'fred_release: "^Unemployment Insurance Weekly Claims"',
+     'fred_release: "Unemployment Insurance Weekly Claims"'),
     ("書けなかったぶんも「やった」と報告する", "src/11_sync.js",
      "  plan.created = done.created;\n  plan.updated = done.updated;\n"
      "  plan.deleted = done.deleted;\n  plan.truncated = ranOut;",

@@ -165,7 +165,19 @@ function fredReleaseDates_(apiKey, start, end) {
       'offset=' + offset,
     ].join('&');
 
-    const payload = fetchJson_(url);
+    // 続きのページより、書き込む時間の方が大事。
+    if (offset > 0 && !timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('FRED: 時間が足りないため ' + rows.length + ' 件で切り上げます。');
+      break;
+    }
+
+    let payload = fetchJson_(url);
+    if (payload === null) {
+      // FRED は混むと 504 を返す。実際に2ページ目で出た。一度だけ待って
+      // 試し直す（ここで諦めると、窓の後半の発表日がまるごと抜ける）。
+      sleep_(2000);
+      payload = fetchJson_(url);
+    }
     if (payload === null) return rows.length ? rows : null;
     // 応答の形が変わって配列でなくなっても、そこで落ちない。
     const page = Array.isArray(payload.release_dates) ? payload.release_dates : [];
@@ -208,6 +220,15 @@ function providerEarnings_(ctx) {
   const events = [];
   let failures = 0;
   for (let i = 0; i < days.length; i += EARNINGS_BATCH) {
+    // ここは営業日1日につき1リクエスト。窓が広いと数十回になり、
+    // 実行時間の上限（6分）をここだけで使い切ることがある。
+    // 途中でも残り時間を見て、足りなければ取れたぶんで切り上げる。
+    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('決算: 時間が足りないため ' + i + ' 日ぶんで切り上げます'
+           + '（残りは次の実行で取ります）。');
+      markSourceDown_('earnings', '時間切れで一部しか取得していません');
+      break;
+    }
     const chunk = days.slice(i, i + EARNINGS_BATCH);
     const responses = fetchAllJson_(chunk.map(function (day) {
       return NASDAQ_EARNINGS + dateKey_(day);
@@ -550,13 +571,13 @@ function fetchSchedulePage_(source, year) {
   const html = fetchText_(url);
   let rows = null;
   if (html === null) {
-    log_('発表予定表を取得できませんでした: ' + url);
+    log_('発表予定表を取得できませんでした: ' + safeUrl_(url));
   } else {
     const parsed = parseScheduleRows_(html, year);
     // 行がほとんど取れないのは、表の作りが変わった合図。中途半端に
     // 採ると誤った時刻が入るので、丸ごと捨てて暫定値に落とす。
     if (parsed.length < SCHEDULE_MIN_ROWS) {
-      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + url);
+      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + safeUrl_(url));
     } else {
       rows = parsed;
     }

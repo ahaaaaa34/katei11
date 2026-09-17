@@ -58,6 +58,35 @@ function sourceIsDown_(name) {
   return Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name || '');
 }
 
+/**
+ * 実行時間の見張り。
+ *
+ * Apps Script は1回の実行を6分で打ち切る。**集める段でそれを使い切ると、
+ * カレンダーには何も書けないまま終わる**（実際に起きた。決算の取得が
+ * 営業日1日につき1リクエストで、そこで数分を使っていた）。
+ *
+ * 開始時刻を覚えておき、残りが足りなければその情報源を見送る。
+ * 見送ったぶんは「落ちている」扱いにするので、既に入っている予定は消えない。
+ */
+const RUN_LIMIT_MS = 6 * 60 * 1000;      // Apps Script の上限
+const COLLECT_RESERVE_MS = 2 * 60 * 1000; // 書き込みに残しておく時間
+let RUN_STARTED_ = 0;
+
+function startRunClock_() {
+  RUN_STARTED_ = Date.now();
+}
+
+/** 残り時間が reserve より多いか。開始を記録していなければ常に true。 */
+function timeLeftFor_(reserve) {
+  if (!RUN_STARTED_) return true;
+  return (Date.now() - RUN_STARTED_) < (RUN_LIMIT_MS - reserve);
+}
+
+/** 今回の実行が始まってからの経過（秒）。 */
+function runElapsedSeconds_() {
+  return RUN_STARTED_ ? Math.round((Date.now() - RUN_STARTED_) / 1000) : 0;
+}
+
 /** 今回落ちていた情報源の名前（実行結果の報告に使う）。 */
 function downSources_() { return Object.keys(SOURCE_DOWN_); }
 
@@ -83,6 +112,14 @@ function collectEvents_(ctx) {
 
   let raw = [];
   providers.forEach(function (provider) {
+    // 集める段で時間を使い切ると、書き込みに入れないまま6分で打ち切られる。
+    // 残り時間が足りなければ、その情報源は今回あきらめる。
+    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('情報源 ' + provider.name + ': 時間が足りないため今回は見送ります。');
+      markSourceDown_(provider.name, '時間切れのため今回は取得していません');
+      return;
+    }
+    const began = Date.now();
     let found;
     try {
       found = provider.run(ctx) || [];
@@ -92,7 +129,10 @@ function collectEvents_(ctx) {
       return;
     }
     found = dropImplausibleFloods_(found, provider.name);
-    log_(provider.name + ': ' + found.length + ' 件');
+    // かかった時間も出す。遅い取得先は実行時間の上限に直結するので、
+    // 「どれが重いのか」はログから分かるようにしておく。
+    log_(provider.name + ': ' + found.length + ' 件（'
+         + ((Date.now() - began) / 1000).toFixed(1) + ' 秒）');
     raw = raw.concat(found);
   });
 

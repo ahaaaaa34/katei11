@@ -366,7 +366,10 @@ const INDICATORS = [
       weekday: "thu",
       exact: true
     },
-    fred_release: "Unemployment Insurance Weekly Claims",
+    // FRED には州別（State Unemployment Insurance Weekly Claims Report）と
+    // 全国（Unemployment Insurance Weekly Claims Report）の2つがある。
+    // 頭に固定して、全国のぶんだけに当てる。実際に両方へ当たっていた。
+    fred_release: "^Unemployment Insurance Weekly Claims",
     url: "https://oui.doleta.gov/unemploy/claims.asp",
     why: "唯一の週次高頻度雇用データ。労働市場の転換点をいち早く映すため、景気後退 懸念が高まる局面では月次指標より材料視される。",
     match: ["initial jobless claims", "continuing jobless claims"]
@@ -1116,7 +1119,7 @@ function fetchJson_(url, options) {
   try {
     return JSON.parse(response);
   } catch (err) {
-    log_('JSON として読めませんでした: ' + url);
+    log_('JSON として読めませんでした: ' + safeUrl_(url));
     return null;
   }
 }
@@ -1131,12 +1134,31 @@ function fetchText_(url, options) {
     const response = UrlFetchApp.fetch(url, params);
     const code = response.getResponseCode();
     if (code >= 200 && code < 300) return response.getContentText();
-    log_('HTTP ' + code + ': ' + url);
+    log_('HTTP ' + code + ': ' + safeUrl_(url));
     return null;
   } catch (err) {
-    log_('接続できませんでした: ' + url + ' (' + err + ')');
+    log_('接続できませんでした: ' + safeUrl_(url) + ' (' + err + ')');
     return null;
   }
+}
+
+/**
+ * 記録に残してよい形に URL を直す。
+ *
+ * 取得に失敗すると URL をそのままログに出していた。FRED の API キーは
+ * URL に載るので、**実行ログを見せた相手に鍵が渡る**。実際にそうなった
+ * （画面を撮って送る、というごく普通のことで起きる）。
+ *
+ * 鍵らしき値は、末尾の4文字だけ残して伏せる。どのキーを使ったかは
+ * 分かるが、使える形では残らない。
+ */
+const SECRET_PARAMS = /([?&](?:api_key|apikey|key|token|access_token|secret|password|auth)=)([^&#]*)/gi;
+
+function safeUrl_(url) {
+  return String(url).replace(SECRET_PARAMS, function (whole, head, value) {
+    if (value.length <= 4) return head + '****';
+    return head + '****' + value.slice(-4);
+  });
 }
 
 function pad2_(n) {
@@ -2406,7 +2428,19 @@ function fredReleaseDates_(apiKey, start, end) {
       'offset=' + offset,
     ].join('&');
 
-    const payload = fetchJson_(url);
+    // 続きのページより、書き込む時間の方が大事。
+    if (offset > 0 && !timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('FRED: 時間が足りないため ' + rows.length + ' 件で切り上げます。');
+      break;
+    }
+
+    let payload = fetchJson_(url);
+    if (payload === null) {
+      // FRED は混むと 504 を返す。実際に2ページ目で出た。一度だけ待って
+      // 試し直す（ここで諦めると、窓の後半の発表日がまるごと抜ける）。
+      sleep_(2000);
+      payload = fetchJson_(url);
+    }
     if (payload === null) return rows.length ? rows : null;
     // 応答の形が変わって配列でなくなっても、そこで落ちない。
     const page = Array.isArray(payload.release_dates) ? payload.release_dates : [];
@@ -2449,6 +2483,15 @@ function providerEarnings_(ctx) {
   const events = [];
   let failures = 0;
   for (let i = 0; i < days.length; i += EARNINGS_BATCH) {
+    // ここは営業日1日につき1リクエスト。窓が広いと数十回になり、
+    // 実行時間の上限（6分）をここだけで使い切ることがある。
+    // 途中でも残り時間を見て、足りなければ取れたぶんで切り上げる。
+    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('決算: 時間が足りないため ' + i + ' 日ぶんで切り上げます'
+           + '（残りは次の実行で取ります）。');
+      markSourceDown_('earnings', '時間切れで一部しか取得していません');
+      break;
+    }
     const chunk = days.slice(i, i + EARNINGS_BATCH);
     const responses = fetchAllJson_(chunk.map(function (day) {
       return NASDAQ_EARNINGS + dateKey_(day);
@@ -2791,13 +2834,13 @@ function fetchSchedulePage_(source, year) {
   const html = fetchText_(url);
   let rows = null;
   if (html === null) {
-    log_('発表予定表を取得できませんでした: ' + url);
+    log_('発表予定表を取得できませんでした: ' + safeUrl_(url));
   } else {
     const parsed = parseScheduleRows_(html, year);
     // 行がほとんど取れないのは、表の作りが変わった合図。中途半端に
     // 採ると誤った時刻が入るので、丸ごと捨てて暫定値に落とす。
     if (parsed.length < SCHEDULE_MIN_ROWS) {
-      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + url);
+      log_('発表予定表の読み取りに失敗しました（' + parsed.length + ' 行）: ' + safeUrl_(url));
     } else {
       rows = parsed;
     }
@@ -3462,6 +3505,35 @@ function sourceIsDown_(name) {
   return Object.prototype.hasOwnProperty.call(SOURCE_DOWN_, name || '');
 }
 
+/**
+ * 実行時間の見張り。
+ *
+ * Apps Script は1回の実行を6分で打ち切る。**集める段でそれを使い切ると、
+ * カレンダーには何も書けないまま終わる**（実際に起きた。決算の取得が
+ * 営業日1日につき1リクエストで、そこで数分を使っていた）。
+ *
+ * 開始時刻を覚えておき、残りが足りなければその情報源を見送る。
+ * 見送ったぶんは「落ちている」扱いにするので、既に入っている予定は消えない。
+ */
+const RUN_LIMIT_MS = 6 * 60 * 1000;      // Apps Script の上限
+const COLLECT_RESERVE_MS = 2 * 60 * 1000; // 書き込みに残しておく時間
+let RUN_STARTED_ = 0;
+
+function startRunClock_() {
+  RUN_STARTED_ = Date.now();
+}
+
+/** 残り時間が reserve より多いか。開始を記録していなければ常に true。 */
+function timeLeftFor_(reserve) {
+  if (!RUN_STARTED_) return true;
+  return (Date.now() - RUN_STARTED_) < (RUN_LIMIT_MS - reserve);
+}
+
+/** 今回の実行が始まってからの経過（秒）。 */
+function runElapsedSeconds_() {
+  return RUN_STARTED_ ? Math.round((Date.now() - RUN_STARTED_) / 1000) : 0;
+}
+
 /** 今回落ちていた情報源の名前（実行結果の報告に使う）。 */
 function downSources_() { return Object.keys(SOURCE_DOWN_); }
 
@@ -3487,6 +3559,14 @@ function collectEvents_(ctx) {
 
   let raw = [];
   providers.forEach(function (provider) {
+    // 集める段で時間を使い切ると、書き込みに入れないまま6分で打ち切られる。
+    // 残り時間が足りなければ、その情報源は今回あきらめる。
+    if (!timeLeftFor_(COLLECT_RESERVE_MS)) {
+      log_('情報源 ' + provider.name + ': 時間が足りないため今回は見送ります。');
+      markSourceDown_(provider.name, '時間切れのため今回は取得していません');
+      return;
+    }
+    const began = Date.now();
     let found;
     try {
       found = provider.run(ctx) || [];
@@ -3496,7 +3576,10 @@ function collectEvents_(ctx) {
       return;
     }
     found = dropImplausibleFloods_(found, provider.name);
-    log_(provider.name + ': ' + found.length + ' 件');
+    // かかった時間も出す。遅い取得先は実行時間の上限に直結するので、
+    // 「どれが重いのか」はログから分かるようにしておく。
+    log_(provider.name + ': ' + found.length + ' 件（'
+         + ((Date.now() - began) / 1000).toFixed(1) + ' 秒）');
     raw = raw.concat(found);
   });
 
@@ -4426,16 +4509,18 @@ function planChanges_(plan) {
  * ここに達すると、書き込みの途中で問答無用に止められる。壊れはしない
  * （次の回で追いつく）が、利用者には毎回**失敗の通知が届く**。
  * それより手前で自分から切り上げて、続きは次の回に回す。
+ *
+ * 見るのは「この関数に入ってからの時間」ではなく、**実行が始まってからの
+ * 残り時間**。集める段で時間を使っていたら、書ける量はその残りで決まる。
  */
-const RUN_BUDGET_MS = 4.5 * 60 * 1000;
+const WRITE_RESERVE_MS = 30 * 1000;   // 後片付けのぶんだけ残す
 
 function applyPlan_(plan) {
-  const deadline = Date.now() + RUN_BUDGET_MS;
   const done = { created: [], updated: [], deleted: [] };
   let ranOut = false;
 
   function budgetLeft() {
-    if (Date.now() < deadline) return true;
+    if (timeLeftFor_(WRITE_RESERVE_MS)) return true;
     ranOut = true;
     return false;
   }
@@ -5083,6 +5168,10 @@ function setup() {
 
 /** 自動実行の本体。 */
 function syncCalendar() {
+  // 実行時間の見張りを始める。集める段と書き込む段の両方が、
+  // ここからの残り時間を見て自分から切り上げる。
+  startRunClock_();
+
   // 設定の誤りも「知らせるべき失敗」。ここが try の外にあると、
   // 放置運用で一番起きやすい壊れ方だけが黙って落ち続ける。
   try {
@@ -5138,6 +5227,7 @@ function syncCalendar() {
     const down = downSources_();
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
          + ' / ' + planSummary_(plan)
+         + ' / ' + runElapsedSeconds_() + ' 秒'
          + (plan.truncated ? ' / 時間の上限が近いため途中までです'
                              + '（残りは次の実行で書きます）' : '')
          + (down.length ? ' / 今回つながらなかった情報源: ' + down.join(', ')

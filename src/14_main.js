@@ -333,6 +333,10 @@ function setup() {
 
 /** 自動実行の本体。 */
 function syncCalendar() {
+  // 実行時間の見張りを始める。集める段と書き込む段の両方が、
+  // ここからの残り時間を見て自分から切り上げる。
+  startRunClock_();
+
   // 設定の誤りも「知らせるべき失敗」。ここが try の外にあると、
   // 放置運用で一番起きやすい壊れ方だけが黙って落ち続ける。
   try {
@@ -388,6 +392,7 @@ function syncCalendar() {
     const down = downSources_();
     log_('期間 ' + dateKey_(ctx.start) + ' 〜 ' + dateKey_(ctx.end)
          + ' / ' + planSummary_(plan)
+         + ' / ' + runElapsedSeconds_() + ' 秒'
          + (plan.truncated ? ' / 時間の上限が近いため途中までです'
                              + '（残りは次の実行で書きます）' : '')
          + (down.length ? ' / 今回つながらなかった情報源: ' + down.join(', ')

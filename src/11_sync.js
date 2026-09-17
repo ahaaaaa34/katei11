@@ -585,16 +585,18 @@ function planChanges_(plan) {
  * ここに達すると、書き込みの途中で問答無用に止められる。壊れはしない
  * （次の回で追いつく）が、利用者には毎回**失敗の通知が届く**。
  * それより手前で自分から切り上げて、続きは次の回に回す。
+ *
+ * 見るのは「この関数に入ってからの時間」ではなく、**実行が始まってからの
+ * 残り時間**。集める段で時間を使っていたら、書ける量はその残りで決まる。
  */
-const RUN_BUDGET_MS = 4.5 * 60 * 1000;
+const WRITE_RESERVE_MS = 30 * 1000;   // 後片付けのぶんだけ残す
 
 function applyPlan_(plan) {
-  const deadline = Date.now() + RUN_BUDGET_MS;
   const done = { created: [], updated: [], deleted: [] };
   let ranOut = false;
 
   function budgetLeft() {
-    if (Date.now() < deadline) return true;
+    if (timeLeftFor_(WRITE_RESERVE_MS)) return true;
     ranOut = true;
     return false;
   }

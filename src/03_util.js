@@ -139,7 +139,7 @@ function fetchJson_(url, options) {
   try {
     return JSON.parse(response);
   } catch (err) {
-    log_('JSON として読めませんでした: ' + url);
+    log_('JSON として読めませんでした: ' + safeUrl_(url));
     return null;
   }
 }
@@ -154,12 +154,31 @@ function fetchText_(url, options) {
     const response = UrlFetchApp.fetch(url, params);
     const code = response.getResponseCode();
     if (code >= 200 && code < 300) return response.getContentText();
-    log_('HTTP ' + code + ': ' + url);
+    log_('HTTP ' + code + ': ' + safeUrl_(url));
     return null;
   } catch (err) {
-    log_('接続できませんでした: ' + url + ' (' + err + ')');
+    log_('接続できませんでした: ' + safeUrl_(url) + ' (' + err + ')');
     return null;
   }
+}
+
+/**
+ * 記録に残してよい形に URL を直す。
+ *
+ * 取得に失敗すると URL をそのままログに出していた。FRED の API キーは
+ * URL に載るので、**実行ログを見せた相手に鍵が渡る**。実際にそうなった
+ * （画面を撮って送る、というごく普通のことで起きる）。
+ *
+ * 鍵らしき値は、末尾の4文字だけ残して伏せる。どのキーを使ったかは
+ * 分かるが、使える形では残らない。
+ */
+const SECRET_PARAMS = /([?&](?:api_key|apikey|key|token|access_token|secret|password|auth)=)([^&#]*)/gi;
+
+function safeUrl_(url) {
+  return String(url).replace(SECRET_PARAMS, function (whole, head, value) {
+    if (value.length <= 4) return head + '****';
+    return head + '****' + value.slice(-4);
+  });
 }
 
 function pad2_(n) {
