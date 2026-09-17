@@ -41,8 +41,13 @@ const CONFIG = {
 
   filter: {
     // ナスダックへの影響度がこの値以上の指標だけを登録します。
-    //   90+ 最重要 (CPI, 雇用統計, FOMC)  / 75+ 重要 / 55+ 注目
-    minImpact: 55,
+    //   90+ 🟥 最重要 (CPI, 雇用統計, FOMC)
+    //   75+ 🟧 重要
+    //   55+ 🟨 注目
+    //   54- ⬜ その他
+    // 既定は 75。🟥 と 🟧 だけがカレンダーに入ります。
+    // 🟨 も見たいなら 55、全部なら 0 にしてください。
+    minImpact: 75,
     countries: ['US', 'JP', 'EU', 'CN'],
     categories: [],   // 空 = 全カテゴリ
     include: [],      // スコアに関係なく必ず入れる指標 id
@@ -111,7 +116,7 @@ const CONFIG = {
     // true にすると時刻を持たない「終日の予定」になります。
     // 既定は false（発表時刻つき）。
     allDay: false,
-    impactEmoji: true,      // 🔴🟠🟡⚪ を件名の先頭に付ける
+    impactEmoji: true,      // 🟥🟧🟨⬜ を件名の先頭に付ける
     countryFlag: true,
     showScore: false,       // 件名にスコアを出す
   },
@@ -134,7 +139,11 @@ const CONFIG = {
   reminders: { S: [1440, 30], A: [30], B: [], C: [] },
 
   // Google カレンダーの色 ID（11=赤 6=オレンジ 5=黄 8=グレー）
-  colors: { S: '11', A: '6', B: '5', C: '8' },
+  // 予定の色。ランクは件名の 🟥🟧 で分かるので、背景はグレーで揃える。
+  // Google の色 ID: 1 ラベンダー / 2 セージ / 3 グレープ / 4 フラミンゴ
+  //                 5 バナナ / 6 みかん / 7 クジャク / 8 グラファイト(灰)
+  //                 9 ブルーベリー / 10 バジル / 11 トマト
+  colors: { S: '8', A: '8', B: '8', C: '8' },
 
   digest: {
     weeklyEvent: true,      // 月曜に「今週の注目指標」を終日予定として作る
@@ -3760,7 +3769,7 @@ function applyFilter_(events) {
  * 件名と説明文の組み立て。
  */
 
-const TIER_EMOJI = { S: '🔴', A: '🟠', B: '🟡', C: '⚪' };
+const TIER_EMOJI = { S: '🟥', A: '🟧', B: '🟨', C: '⬜' };
 const TIER_LABEL = { S: '最重要', A: '重要', B: '注目', C: '参考' };
 const FLAGS = { US: '🇺🇸', JP: '🇯🇵', EU: '🇪🇺', CN: '🇨🇳', GB: '🇬🇧', DE: '🇩🇪' };
 const MARKER = 'econ-calendar';
@@ -5949,9 +5958,12 @@ function runTests() {
 
   check('通信なしで1か月ぶんの予定が組める', function () {
     const saved = JSON.parse(JSON.stringify(CONFIG.providers));
+    const savedImpact = CONFIG.filter.minImpact;
     CONFIG.providers.fred = false;
     CONFIG.providers.earnings = false;
     CONFIG.providers.investing = false;
+    // 利用者がしきい値をいくつにしていても、この検査は同じ条件で行う。
+    CONFIG.filter.minImpact = 55;
     try {
       const events = collectEvents_({ start: ymd_(2026, 9, 1), end: ymd_(2026, 9, 30),
                                       timezone: 'Asia/Tokyo' });
@@ -5962,6 +5974,7 @@ function runTests() {
       });
     } finally {
       Object.keys(saved).forEach(function (k) { CONFIG.providers[k] = saved[k]; });
+      CONFIG.filter.minImpact = savedImpact;
     }
   });
 

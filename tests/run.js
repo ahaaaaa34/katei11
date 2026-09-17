@@ -515,6 +515,8 @@ suite('突き合わせと選抜', () => {
   test('通信なしでも1か月ぶんの実用的な予定表になる', () => {
     const api = loadGas();
     offlineConfig(api);
+    // 既定のしきい値に左右されないよう、ここで決める。
+    api.CONFIG.filter.minImpact = 55;
     const events = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
                                         timezone: 'Asia/Tokyo' });
     const ids = new Set(events.map((e) => e.indicatorId));
@@ -702,7 +704,7 @@ suite('カレンダーへの反映', () => {
 suite('表示', () => {
   test('件名にランクと国が入る', () => {
     const title = G.renderTitle_(event(G, { impact: 98, title: '米 CPI' }));
-    ok(title.indexOf('🔴') === 0 && title.indexOf('米 CPI') !== -1, title);
+    ok(title.indexOf('🟥') === 0 && title.indexOf('米 CPI') !== -1, title);
   });
 
   test('結果が出たら件名に反映する', () => {
@@ -1292,6 +1294,7 @@ suite('回帰: 窓の端で予定が作り直される', () => {
     api.CONFIG.providers.earnings = false;
     api.CONFIG.providers.investing = false;
     api.CONFIG.providers.fomcAutoFetch = false;
+    api.CONFIG.filter.minImpact = 55;   // 既定のしきい値に左右されないようにする
     return api;
   }
 
@@ -1952,6 +1955,7 @@ suite('90日連続運用', () => {
     api.CONFIG.providers.earnings = false;
     api.CONFIG.providers.investing = false;
     api.CONFIG.providers.fomcAutoFetch = false;
+    api.CONFIG.filter.minImpact = 55;   // 既定のしきい値に左右されないようにする
 
     const createdTimes = {};
     let deletions = 0;
@@ -2115,6 +2119,7 @@ suite('終日の予定にする設定', () => {
 
   test('allDay を立てるとすべて終日になる', () => {
     const api = offline(loadGas());
+    api.CONFIG.filter.minImpact = 55;
     const events = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
                                         timezone: 'Asia/Tokyo' });
     ok(events.length > 20);
@@ -2178,6 +2183,7 @@ suite('終日の予定にする設定', () => {
 
   test('もともと終日のもの（休場・週次まとめ）はそのまま', () => {
     const api = offline(loadGas());
+    api.CONFIG.filter.minImpact = 55;   // 休場は 60 なので、ここを下げないと出ない
     const holiday = api.collectEvents_({ start: Y(2026, 9, 1), end: Y(2026, 9, 30),
                                          timezone: 'Asia/Tokyo' })
       .find((e) => e.indicatorId === 'market_holiday');
@@ -2914,7 +2920,7 @@ suite('週次まとめは、実際にカレンダーにあるものから作る'
   test('カタログに無い指標（決算）でも落ちない', () => {
     const api = loadGas({ Calendar: fakeCalendar() });
     const restored = api.eventFromResource_({
-      id: 'ecx', summary: '🔴 🇺🇸 NVDA 決算発表 (引け後)',
+      id: 'ecx', summary: '🟥 🇺🇸 NVDA 決算発表 (引け後)',
       start: { dateTime: '2026-11-19T06:15:00+09:00' },
       end: { dateTime: '2026-11-19T06:45:00+09:00' },
       extendedProperties: { private: { ecal: '1', indicator: 'earnings_NVDA',
@@ -3228,7 +3234,7 @@ suite('通知と色は、ランクどおりに付く', () => {
 
   test('ランクごとに、決めた絵文字が付く', () => {
     const api = loadGas({ Calendar: fakeCalendar() });
-    [[98, '🔴'], [80, '🟠'], [60, '🟡'], [40, '⚪']].forEach((row) => {
+    [[98, '🟥'], [80, '🟧'], [60, '🟨'], [40, '⬜']].forEach((row) => {
       ok(resource(api, row[0]).summary.indexOf(row[1]) === 0,
          row[0] + ': ' + resource(api, row[0]).summary.slice(0, 4));
     });
@@ -5210,11 +5216,14 @@ suite('発表元リンク（数字を自分で確かめるための出口）', (
     Object.assign(api.CONFIG.providers, { fred: false, earnings: false, investing: false,
                                           fomcAutoFetch: false, officialTimes: false });
     api.CONFIG.window.daysAhead = 300;
+    api.CONFIG.filter.minImpact = 0;   // 全ランクを見る
     const events = api.collectEvents_(api.syncWindow_(Y(2026, 9, 11)));
     ok(events.length > 200, '件数: ' + events.length);
     const missing = {};
     events.forEach((e) => { if (!e.url) missing[e.indicatorId] = true; });
-    eq(Object.keys(missing), []);
+    // シカゴ PMI だけは発表元のページを確かめられていないので空のまま。
+    // 増やすときは checkSourceUrls() で確かめてから。
+    eq(Object.keys(missing), ['us_chicago_pmi']);
   });
 
   test('リンクはすべて https で、集計サイトではない', () => {

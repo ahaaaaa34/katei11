@@ -94,9 +94,12 @@ function runTests() {
 
   check('通信なしで1か月ぶんの予定が組める', function () {
     const saved = JSON.parse(JSON.stringify(CONFIG.providers));
+    const savedImpact = CONFIG.filter.minImpact;
     CONFIG.providers.fred = false;
     CONFIG.providers.earnings = false;
     CONFIG.providers.investing = false;
+    // 利用者がしきい値をいくつにしていても、この検査は同じ条件で行う。
+    CONFIG.filter.minImpact = 55;
     try {
       const events = collectEvents_({ start: ymd_(2026, 9, 1), end: ymd_(2026, 9, 30),
                                       timezone: 'Asia/Tokyo' });
@@ -107,6 +110,7 @@ function runTests() {
       });
     } finally {
       Object.keys(saved).forEach(function (k) { CONFIG.providers[k] = saved[k]; });
+      CONFIG.filter.minImpact = savedImpact;
     }
   });
 

@@ -2,7 +2,7 @@
  * 件名と説明文の組み立て。
  */
 
-const TIER_EMOJI = { S: '🔴', A: '🟠', B: '🟡', C: '⚪' };
+const TIER_EMOJI = { S: '🟥', A: '🟧', B: '🟨', C: '⬜' };
 const TIER_LABEL = { S: '最重要', A: '重要', B: '注目', C: '参考' };
 const FLAGS = { US: '🇺🇸', JP: '🇯🇵', EU: '🇪🇺', CN: '🇨🇳', GB: '🇬🇧', DE: '🇩🇪' };
 const MARKER = 'econ-calendar';
